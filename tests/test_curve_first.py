@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from curve_first import Client, curve_boundaries, merge_regions, model_states, plan_dataset, run_model, save_report
-from test_batch import FakeDataset
+from backend.curve_first import Client, curve_boundaries, merge_regions, model_states, plan_dataset, run_model, save_report
+from tests.test_batch import FakeDataset
 
 
 class Curves(unittest.TestCase):

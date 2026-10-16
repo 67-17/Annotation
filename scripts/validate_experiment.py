@@ -3,7 +3,10 @@ import argparse
 import os
 from pathlib import Path
 
-from attach import create_session
+if __package__:
+    from .attach import create_session
+else:
+    from attach import create_session
 
 
 def validate(session, config_path, context_path):

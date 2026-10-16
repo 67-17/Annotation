@@ -1,6 +1,6 @@
 """Focused checks for frame/time alignment and annotation integrity.
 
-Run: python -m unittest -v test_annotation
+Run: python -m unittest -v tests.test_annotation
 Optional real-data checks: REAL_DATASET=/path/to/xarm7 python -m unittest -v
 """
 import asyncio
@@ -9,14 +9,16 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-import app as service
-from dataset import Dataset
-from review import refine
+import backend.app as service
+from backend.dataset import Dataset
+from backend.review import refine
 
 
 async def request(method, path, body=None):
@@ -35,9 +37,10 @@ async def request(method, path, body=None):
     async def send(message):
         events.append(message)
 
+    parsed = urlsplit(path)
     scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"},
-             "http_version": "1.1", "method": method, "scheme": "http", "path": path,
-             "raw_path": path.encode(), "query_string": b"", "root_path": "",
+             "http_version": "1.1", "method": method, "scheme": "http", "path": parsed.path,
+             "raw_path": parsed.path.encode(), "query_string": parsed.query.encode(), "root_path": "",
              "headers": [(b"content-type", b"application/json")],
              "server": ("test", 80), "client": ("test", 1234)}
     # The development sandbox restricts socketpair wakeups from worker
@@ -126,7 +129,39 @@ class AnnotationTests(unittest.TestCase):
         self.assertEqual(anchor["frame_index"], 0)
         self.assertEqual(self.call("GET", self.base + "/annotations")[1], result)
         exported = self.call("GET", f"/api/datasets/{self.summary['id']}/export")[1]
-        self.assertEqual(exported["interval_semantics"], "[contact, release)")
+        self.assertEqual(exported["episodes"][0]["left"][0]["clock"], "left")
+        self.assertAlmostEqual(exported["episodes"][0]["left"][0]["contact_time_s"], 1 / 60)
+        self.assertAlmostEqual(exported["episodes"][0]["left"][0]["release_time_s"], 6 / 60)
+        self.assertEqual(exported["episodes"][0]["left"][0]["contact_frame"], 1)
+        self.assertEqual(exported["episodes"][0]["left"][0]["release_frame"], 6)
+        self.assertEqual(exported["episodes"][0]["right"], [])
+
+    def test_export_omits_drafts_and_screening_details(self):
+        self.save([self.interval(confirmed=False)])
+        service.dataset(self.summary["id"]).episodes[1] = {"length": 0}
+        exported = self.call("GET", f"/api/datasets/{self.summary['id']}/export")[1]
+        self.assertEqual(exported, {"episodes": [
+            {"episode": 0, "left": [], "right": []},
+            {"episode": 1, "left": [], "right": []},
+        ]})
+
+    def test_episode_can_load_frames_before_curves(self):
+        with patch.object(Dataset, "curves", side_effect=RuntimeError("slow curves")):
+            status, episode = self.call("GET", self.base + "?include_curves=false")
+            self.assertEqual(status, 200)
+            self.assertEqual(episode["curves"], [])
+            self.assertTrue(episode["clocks"]["data"])
+
+    def test_save_reuses_episode_clocks_without_rereading_parquet(self):
+        ds = service.dataset(self.summary["id"])
+        ds.episode(0, include_curves=False)
+        ds.rows.cache_clear()
+        ds.samples.cache_clear()
+        with patch.object(Dataset, "rows", side_effect=RuntimeError("Parquet read")), \
+             patch.object(Dataset, "samples", side_effect=RuntimeError("sample read")):
+            status, saved = self.save([self.interval()])
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["intervals"][0]["start_anchor"]["sample_index"], 1)
 
     def test_stale_save_does_not_overwrite(self):
         self.assertEqual(self.save([self.interval()])[0], 200)
@@ -163,11 +198,25 @@ class AnnotationTests(unittest.TestCase):
     def test_tactile_local_frame_adds_video_offset(self):
         from unittest.mock import patch
         ds = service.dataset(self.summary["id"])
-        with patch("dataset.cv2.VideoCapture") as capture:
+        with patch("backend.dataset.cv2.VideoCapture") as capture:
             capture.return_value.isOpened.return_value = True
             capture.return_value.read.return_value = (True, np.zeros((2, 2, 3), np.uint8))
             _, number = ds.frame(0, "observation.images.photon_left", 1 / 60)
         self.assertEqual(number, 601)
+
+    def test_preview_jpeg_reuses_video_frame_and_route_returns_bytes(self):
+        from unittest.mock import patch
+        ds = service.dataset(self.summary["id"])
+        with patch.object(ds, "_frame_reference", return_value=("test-video", 12, 60.0, "av1")), \
+             patch.object(ds, "_ffmpeg_bytes", return_value=b"jpeg-bytes") as decode:
+            first = ds.frame_jpeg(0, "observation.images.photon_left", 0.2)
+            second = ds.frame_jpeg(0, "observation.images.photon_left", 0.2001)
+            response = service.get_frame(self.summary["id"], 0, "observation.images.photon_left", 0.2)
+        self.assertEqual(first, (b"jpeg-bytes", 12))
+        self.assertEqual(second, first)
+        self.assertEqual(response.body, b"jpeg-bytes")
+        self.assertEqual(response.headers["x-video-frame"], "12")
+        decode.assert_called_once()
 
 
 class CurveTests(unittest.TestCase):

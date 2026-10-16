@@ -8,7 +8,7 @@ import uuid
 
 import numpy as np
 
-from review import refine
+from .review import refine
 
 STATES = {"contact", "no_contact", "uncertain"}
 ACTIVE = {"queued", "planning", "running", "stopping"}
@@ -37,7 +37,8 @@ def parse_states(text, count):
     try:
         states = json.loads(clean)["states"]
         if not isinstance(states, list) or len(states) != count:
-            raise ValueError("states 数量与输入帧数不符")
+            actual = len(states) if isinstance(states, list) else "非数组"
+            raise ValueError(f"states 数量与输入帧数不符（需要 {count}，返回 {actual}）")
         if any(not isinstance(s, str) or s not in STATES for s in states):
             raise ValueError("states 包含无效状态")
         return states, None
@@ -88,7 +89,7 @@ def curve_first_result(unit):
                        "focus": boundaries[0]["candidate_time"] if boundaries else region["boundaries"][0]["bracket_start"],
                        "priority": "high" if "uncertain" in states or not boundaries else "boundary",
                        "reason": evidence + "。" + model_note.lstrip("；") + "。请人工选择本侧开始／结束帧。",
-                       "model_boundaries": boundaries})
+                       "model_boundaries": boundaries, "curve_boundaries": region["boundaries"]})
         regions.append({**region, "model_boundaries": boundaries, "uncertain_frames": states.count("uncertain")})
     if unit["warnings"]:
         identity = f"{unit['episode']}:{unit['side']}:curve_warning"
@@ -330,7 +331,7 @@ class BatchManager:
 
     def plan_curve_first(self, run, ds):
         # Import at call time: the standalone planner also uses windows/merge_state.
-        from curve_first import plan_dataset
+        from .curve_first import plan_dataset
         existing = {(u["episode"], u["side"]): u for u in self.units(run["id"])}
         episodes = sorted(run["options"].get("episodes") or ds.episodes)
         if any(ep not in ds.episodes for ep in episodes):
@@ -441,11 +442,14 @@ class BatchManager:
                     if number < unit["done_windows"]:
                         continue
                     with self.lock:
-                        run.update(current={"episode": ep, "side": side, "start": unit["times"][first], "end": unit["times"][end - 1]})
+                        run.update(current={"episode": ep, "side": side, "start": unit["times"][first], "end": unit["times"][end - 1],
+                                            "stage": "read", "started_at": time.time()})
                         self.progress(run)
                     if run["state"] == "stopping":
                         break
                     started = time.monotonic()
+                    model_started = None
+                    read_seconds = model_seconds = 0.0
                     error = None
                     try:
                         if not scene and not tactile:
@@ -464,12 +468,34 @@ class BatchManager:
                             f"按 index=0 到 {end-first-1} 逐帧判断；不要漏掉任何 index。"
                             "只能输出 JSON 对象 {\"states\":[...]}。每项只允许 contact、no_contact、uncertain，"
                             "states 数量必须等于时间点数量，而非图片数量。无法判断填 uncertain，不编造边界。\n"
+                            f"本窗口恰好有 {end-first} 个时间点，必须返回恰好 {end-first} 项 states。\n"
                             + ("这些帧来自曲线圈定的边界候选段，曲线不是接触真值。\n" if unit.get("pipeline") == "curve_first" else "")
                             + run["options"]["prompt"])
-                        output = self.model.infer(images, prompt)
-                        states, error = parse_states(output["text"], end - first)
+                        read_seconds = time.monotonic() - started
+                        with self.lock:
+                            run["current"]["stage"] = "model"
+                            self.progress(run)
+                        model_started = time.monotonic()
+                        try:
+                            output = self.model.infer(images, prompt)
+                            states, error = parse_states(output["text"], end - first)
+                            # Retry format failures once with the same decoded images.
+                            # Never pad/truncate states: that could shift contact boundaries.
+                            if error and run["state"] != "stopping":
+                                run["format_retries"] = run.get("format_retries", 0) + 1
+                                correction = (
+                                    f"\n上次输出格式错误：{error}。请重新检查这些图片，"
+                                    f"按 index 依次输出恰好 {end-first} 个状态。"
+                                    f"输出结构示例：{json.dumps({'states': ['uncertain'] * (end-first)})}。"
+                                    "示例不代表判断结果，请依据图像填写。只能输出 JSON。")
+                                output = self.model.infer(images, prompt + correction)
+                                states, error = parse_states(output["text"], end - first)
+                        finally:
+                            model_seconds = time.monotonic() - model_started
                         unit["last_output"] = output["text"][:8000]
                     except Exception as exc:
+                        if model_started is None:
+                            read_seconds = time.monotonic() - started
                         states, error = ["uncertain"] * (end - first), str(exc)
                     if error:
                         run["failed_windows"] += 1
@@ -483,6 +509,10 @@ class BatchManager:
                         run["done_windows"] += 1
                         run["processing_seconds"] += seconds
                         run["window_seconds"] = [*run["window_seconds"], seconds][-20:]
+                        run["last_window"] = {**run["current"], "read_seconds": read_seconds,
+                                              "model_seconds": model_seconds, "total_seconds": seconds}
+                        run["read_seconds"] = run.get("read_seconds", 0) + read_seconds
+                        run["model_seconds"] = run.get("model_seconds", 0) + model_seconds
                         self.progress(run)
                     # Repeated failures should not burn the whole dataset/GPU allocation.
                     if len(unit["errors"]) >= 3 and all(e["window"] == number - 2 + i for i, e in enumerate(unit["errors"][-3:])):

@@ -4,6 +4,11 @@ import json
 import os
 from urllib.parse import urlsplit
 
+if __package__:
+    from .attach import create_session
+else:
+    from attach import create_session
+
 
 BROKEN_PATH = "/mount/ccai_nas2/shuai/determined"
 
@@ -43,12 +48,9 @@ def main():
     for key in ("NO_PROXY", "no_proxy"):
         os.environ[key] = ",".join(filter(None, [os.environ.get(key, ""), host]))
 
-    from determined.common import api
-    from determined.common.api import authentication, bindings, certs
+    from determined.common.api import bindings
 
-    cert = certs.default_load(args.master)
-    auth = authentication.Authentication(args.master, cert=cert)
-    session = api.Session(master=args.master, user=auth.get_session_user(), auth=auth, cert=cert)
+    session = create_session(args.master)
     experiment = bindings.get_GetExperiment(session, experimentId=args.experiment).experiment
     config = experiment.config
     if not isinstance(config, dict):

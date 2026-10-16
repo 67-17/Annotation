@@ -9,25 +9,36 @@ from unittest import mock
 from determined.common import api
 from determined.common.api import authentication, bindings, certs
 
-from attach import create_session, diagnose_proxy
-from validate_experiment import validate
+from scripts.attach import create_session, diagnose_proxy
+from scripts.validate_experiment import validate
+from scripts import inspect_mounts
 from determined.common import context
 
 
 class SessionTests(unittest.TestCase):
+    def test_mount_diagnostics_reuse_compatible_authentication(self):
+        experiment = SimpleNamespace(config={"bind_mounts": [], "checkpoint_storage": {"type": "shared_fs"}}, state="STATE_RUNNING")
+        with mock.patch("sys.argv", ["inspect_mounts.py", "123"]), \
+             mock.patch.object(inspect_mounts, "create_session", return_value=mock.sentinel.session) as login, \
+             mock.patch.object(bindings, "get_GetExperiment", return_value=SimpleNamespace(experiment=experiment)) as get, \
+             mock.patch("builtins.print"):
+            inspect_mounts.main()
+        login.assert_called_once_with("http://10.130.130.5:4096")
+        get.assert_called_once_with(mock.sentinel.session, experimentId=123)
+
     def test_deployment_proxy_field_matches_master_yaml_schema(self):
         from ruamel.yaml import YAML
 
         yaml = YAML(typ="safe")
         for name in ("experiment.yaml", "command.yaml"):
             with self.subTest(config=name):
-                config = yaml.load((Path(__file__).parent / name).read_text())
+                config = yaml.load((Path(__file__).resolve().parent.parent / "configs" / name).read_text())
                 self.assertEqual(config["environment"]["proxy_ports"], [
                     {"proxy_port": 8088, "proxy_tcp": True}])
                 self.assertEqual(config["environment"]["ports"]["contact_web"], 8088)
 
     def test_validation_never_activates_or_creates_experiment(self):
-        with mock.patch("validate_experiment.Path.read_text", return_value="name: test"), \
+        with mock.patch("scripts.validate_experiment.Path.read_text", return_value="name: test"), \
              mock.patch.object(context, "read_v1_context", return_value=[]) as read_context, \
              mock.patch.object(bindings, "post_CreateExperiment") as post:
             validate(mock.sentinel.session, "/test/config.yaml", "/test/context")

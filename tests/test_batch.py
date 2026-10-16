@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 import numpy as np
 
-import app as service
-from batch import BatchManager, curve_first_result, merge_state, parse_states, screening_result, unit_windows, windows
-from test_annotation import request
+import backend.app as service
+from backend.batch import BatchManager, curve_first_result, merge_state, parse_states, screening_result, unit_windows, windows
+from tests.test_annotation import request
 
 
 class FakeDataset:
@@ -178,16 +178,64 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(result["state"],"done")
         self.assertEqual(len(self.model.calls),12)
 
+    def test_window_timings_include_reads_and_model_and_survive_resume(self):
+        clock = [0.0]
+        frame, infer = self.ds.frame, self.model.infer
+
+        def timed_frame(*args):
+            clock[0] += 0.25
+            current = self.manager.get("test")["current"]
+            self.assertEqual(current["stage"], "read")
+            return frame(*args)
+
+        def timed_infer(*args):
+            self.assertEqual(self.manager.get("test")["current"]["stage"], "model")
+            clock[0] += 2
+            return infer(*args)
+
+        self.ds.frame, self.model.infer = timed_frame, timed_infer
+        self.model.callback = lambda: self.manager.cancel("test")
+        with patch("backend.batch.time.monotonic", side_effect=lambda: clock[0]):
+            result = self.work()
+        timing = result["last_window"]
+        self.assertEqual(timing["read_seconds"], 1.5)  # Three scene/tactile pairs.
+        self.assertEqual(timing["model_seconds"], 2)
+        self.assertEqual(timing["total_seconds"], 3.5)
+        self.assertEqual(result["processing_seconds"], 3.5)
+        self.assertEqual(result["state"], "cancelled")
+
     def test_three_failures_stop_and_recover_marks_interrupted(self):
         self.model.bad = True
         run = self.work()
         self.assertEqual(run["state"],"error")
         self.assertEqual(run["failed_windows"],3)
+        self.assertEqual(len(self.model.calls), 6)  # One bounded retry per window.
+        self.assertTrue(all(s == "uncertain" for s in self.manager.units("test")[0]["states"]))
         self.assertFalse(self.manager.busy())
         run["state"] = "running"
         self.manager.put_run(run)
         self.manager.recover()
         self.assertEqual(self.manager.get("test")["state"],"interrupted")
+
+    def test_wrong_state_count_retries_same_images_without_poisoning_states(self):
+        infer = self.model.infer
+        prompts, images_seen = [], []
+
+        def first_bad(images, prompt):
+            prompts.append(prompt)
+            images_seen.append(images)
+            if len(prompts) == 1:
+                return {"text": '{"states":["contact"]}'}
+            return infer(images, prompt)
+
+        self.model.infer = first_bad
+        run = self.work()
+        self.assertEqual(run["state"], "done")
+        self.assertEqual(run["failed_windows"], 0)
+        self.assertEqual(run["format_retries"], 1)
+        self.assertIs(images_seen[0], images_seen[1])
+        self.assertIn("需要 3，返回 1", prompts[1])
+        self.assertTrue(all(s == "no_contact" for u in self.manager.units("test") for s in u["states"]))
 
     def test_review_requires_saved_version_and_invalidates_after_edit(self):
         run = self.work()

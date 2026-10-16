@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+from bisect import bisect_left
 from functools import lru_cache
 from pathlib import Path
 
@@ -125,7 +126,8 @@ class Dataset:
                 "key": key, "name": key.removeprefix("observation.images."),
                 "relative_path": str(path.relative_to(self.root)),
                 "offset": float(meta.get(base + "/from_timestamp", 0)),
-                "end": float(meta.get(base + "/to_timestamp", len(self.rows(ep)) / self.info["fps"])),
+                "end": float(meta[base + "/to_timestamp"] if base + "/to_timestamp" in meta
+                             else meta["length"] / self.info["fps"]),
                 "fps": float(vi.get("video.fps", self.info["fps"])),
             })
         return result
@@ -174,8 +176,7 @@ class Dataset:
             raise ValueError("触觉采样时间非严格递增")
         return rows
 
-    @lru_cache(maxsize=64)
-    def frame(self, ep, key, time):
+    def _frame_reference(self, ep, key, time):
         camera = self.camera(ep, key)
         path = str(safe_child(self.root, camera["relative_path"]))
         side = camera["name"].removeprefix("photon_")
@@ -195,10 +196,15 @@ class Dataset:
             number = min(last, max(first, number))
         feature = self.info["features"][key]
         codec = feature.get("info", feature.get("video_info", {})).get("video.codec", "")
+        return path, number, camera["fps"], codec
+
+    @lru_cache(maxsize=64)
+    def frame(self, ep, key, time):
+        path, number, fps, codec = self._frame_reference(ep, key, time)
         # OpenCV wheels may ship an AV1 decoder that requires unavailable
         # hardware. System ffmpeg's libdav1d provides reliable CPU decoding.
         if "av1" in codec and ffmpeg_binary():
-            return self._ffmpeg_frame(path, number, camera["fps"]), number
+            return self._ffmpeg_frame(path, number, fps), number
         cap = cv2.VideoCapture(path)
         try:
             if not cap.isOpened():
@@ -206,26 +212,55 @@ class Dataset:
             cap.set(cv2.CAP_PROP_POS_FRAMES, number)
             ok, bgr = cap.read()
             if not ok:
-                return self._ffmpeg_frame(path, number, camera["fps"]), number
+                return self._ffmpeg_frame(path, number, fps), number
             return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB), number
         finally:
             cap.release()
 
+    def frame_jpeg(self, ep, key, time):
+        path, number, fps, codec = self._frame_reference(ep, key, time)
+        return self._jpeg_frame(path, number, fps, codec), number
+
+    @lru_cache(maxsize=128)
+    def _jpeg_frame(self, path, number, fps, codec):
+        if "av1" in codec and ffmpeg_binary():
+            return self._ffmpeg_bytes(path, number, fps, "mjpeg")
+        cap = cv2.VideoCapture(path)
+        try:
+            if not cap.isOpened():
+                raise ValueError("视频无法解码")
+            cap.set(cv2.CAP_PROP_POS_FRAMES, number)
+            ok, bgr = cap.read()
+            if not ok:
+                return self._ffmpeg_bytes(path, number, fps, "mjpeg")
+            encoded, jpeg = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 86])
+            if not encoded:
+                raise ValueError("图像编码失败")
+            return jpeg.tobytes()
+        finally:
+            cap.release()
+
     @staticmethod
-    def _ffmpeg_frame(path, number, fps):
+    def _ffmpeg_bytes(path, number, fps, codec):
         binary = ffmpeg_binary()
         if not binary:
             raise ValueError("该视频需要 ffmpeg 解码；请安装 ffmpeg")
+        encoder = ["-vcodec", "mjpeg", "-q:v", "4"] if codec == "mjpeg" else ["-vcodec", "png"]
         result = subprocess.run(
             # Seek just before the target PTS to avoid microsecond rounding
             # skipping the intended frame in constant-frame-rate video.
             [binary, "-v", "error", "-threads", "1", "-ss", f"{max(0, (number - .25) / fps):.9f}",
-             "-i", path, "-frames:v", "1", "-threads", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
+             "-i", path, "-frames:v", "1", "-threads", "1", "-f", "image2pipe", *encoder, "pipe:1"],
             capture_output=True, timeout=60,
         )
         if result.returncode or not result.stdout:
             raise ValueError("ffmpeg 解码失败：" + result.stderr.decode(errors="replace")[-500:])
-        frame = cv2.imdecode(np.frombuffer(result.stdout, dtype=np.uint8), cv2.IMREAD_COLOR)
+        return result.stdout
+
+    @staticmethod
+    def _ffmpeg_frame(path, number, fps):
+        output = Dataset._ffmpeg_bytes(path, number, fps, "png")
+        frame = cv2.imdecode(np.frombuffer(output, dtype=np.uint8), cv2.IMREAD_COLOR)
         if frame is None:
             raise ValueError("解码帧为空")
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -279,31 +314,43 @@ class Dataset:
                                "points": [[float(t), float(v)] for t, v in zip(table["timestamp"].to_pylist(), values)]})
         return result
 
-    def episode(self, ep):
+    @lru_cache(maxsize=24)
+    def clocks(self, ep):
         rows = self.rows(ep)
         clocks = {"data": [{"index": int(r["frame_index"]), "time": float(r["timestamp"])} for r in rows]}
         for side in ("left", "right"):
             samples = self.samples(ep, side)
             if samples:
                 clocks[side] = [{"index": int(r["tactile_index"]), "time": float(r["time"])} for r in samples]
+        return clocks
+
+    def episode(self, ep, include_curves=True):
+        clocks = self.clocks(ep)
         cameras = self.cameras(ep)
         return {"id": ep, "frames": clocks["data"], "clocks": clocks, "cameras": cameras,
-                "duration": max(float(rows[-1]["timestamp"]), max(
+                "duration": max(clocks["data"][-1]["time"], max(
                     (v[-1]["time"] for v in clocks.values()), default=0)),
-                "tasks": self.episode_meta(ep).get("tasks", []), "curves": self.curves(ep)}
+                "tasks": self.episode_meta(ep).get("tasks", []),
+                "curves": self.curves(ep) if include_curves else []}
 
     def snap(self, ep, time, clock="data"):
         if not np.isfinite(time):
             raise ValueError("标注时间必须为有限数值")
-        if clock == "data":
-            points = [{"time": float(r["timestamp"]), "index": int(r["frame_index"])} for r in self.rows(ep)]
-        elif clock in ("left", "right"):
-            points = [{"time": r["time"], "index": int(r["tactile_index"])} for r in self.samples(ep, clock)]
-        else:
+        if clock not in ("data", "left", "right"):
             raise ValueError("无效的标注时钟")
+        clocks = self.clocks(ep)
+        points = clocks.get(clock, [])
         if not points or time < points[0]["time"] - .02 or time > points[-1]["time"] + .02:
             raise ValueError("标注时间超出采样范围")
-        p = min(points, key=lambda p: abs(p["time"] - time))
-        row = min(self.rows(ep), key=lambda r: abs(float(r["timestamp"]) - p["time"]))
+        def closest(items, value):
+            index = bisect_left(items, value, key=lambda point: point["time"])
+            if index == 0:
+                return items[0]
+            if index == len(items):
+                return items[-1]
+            before, after = items[index - 1], items[index]
+            return before if abs(before["time"] - value) <= abs(after["time"] - value) else after
+        p = closest(points, time)
+        row = closest(clocks["data"], p["time"])
         return {"time": p["time"], "clock": clock, "sample_index": p["index"],
-                "frame_index": int(row["frame_index"]), "dataset_timestamp": float(row["timestamp"])}
+                "frame_index": row["index"], "dataset_timestamp": row["time"]}

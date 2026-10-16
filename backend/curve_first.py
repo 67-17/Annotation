@@ -12,8 +12,8 @@ import urllib.request
 
 import numpy as np
 
-from batch import merge_state, windows
-from dataset import Dataset
+from .batch import merge_state, windows
+from .dataset import Dataset
 
 NOTICE = "仅筛曲线候选段，未查看的帧不代表无接触；曲线未标定，最终起止帧仍需人工确认。"
 
