@@ -27,7 +27,7 @@ esac
 # Stage only source files: no annotations, virtual environments, model weights,
 # or local verification output should become the uploaded model definition.
 annotation_context="$(mktemp -d /tmp/contact-annotation-submit.XXXXXX)"
-cp -- "$annotation_project"/{app.py,batch.py,dataset.py,model_service.py,review.py,requirements.txt,start.sh} "$annotation_context/"
+cp -- "$annotation_project"/{app.py,batch.py,curve_first.py,dataset.py,model_service.py,review.py,requirements.txt,start.sh} "$annotation_context/"
 cp -R -- "$annotation_project/static" "$annotation_context/static"
 if [[ "${1:-}" == --validate-only ]]; then
   "$annotation_client_python" "$annotation_project/validate_experiment.py" "$annotation_project/experiment.yaml" "$annotation_context" --master "$annotation_master"

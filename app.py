@@ -146,6 +146,8 @@ class CurveBody(BaseModel):
 
 class BatchBody(BaseModel):
     dataset: str
+    pipeline: Literal["curve_first", "full"] = "curve_first"
+    episodes: list[int] | None = None
     coverage: Literal["native", "data"] = "native"
     frames: int = Field(default=6, ge=2, le=6)
     camera: str = "observation.images.third_camera"
@@ -163,7 +165,12 @@ BATCH = BatchManager(db, dataset, MODEL)
 
 @app.post("/api/screening", status_code=202)
 def start_screening(body: BatchBody):
-    dataset(body.dataset)
+    ds = dataset(body.dataset)
+    if body.episodes is not None and (not body.episodes or len(set(body.episodes)) != len(body.episodes)
+                                      or any(ep not in ds.episodes for ep in body.episodes)):
+        raise ValueError("请选择有效且不重复的 Episode")
+    if body.pipeline == "full" and body.episodes is not None:
+        raise ValueError("全帧旧模式不支持选择 Episode")
     with JOBS_LOCK:
         if BATCH.busy() or any(j["state"] in ("queued", "running") for j in JOBS.values()):
             raise HTTPException(409, "模型已有任务，请等待完成或停止全量筛查")
@@ -208,7 +215,7 @@ def review_screening(job_id: str, event_id: str, body: ReviewBody):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "model": MODEL.status()}
+    return {"ok": True, "model": MODEL.status(), "screening_pipeline": "curve_first"}
 
 
 @app.post("/api/datasets")

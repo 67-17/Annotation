@@ -49,6 +49,23 @@ async function main() {
   await vm.runInContext("refreshScreening()",sandbox);
   assert.equal(ids.get("batch-resume").hidden,false);
   assert.equal(ids.get("batch-start").disabled,false);
+  assert.match(ids.get("batch-resume").textContent,/旧全帧/);
+  sandbox.run.options.pipeline="curve_first";
+  sandbox.run.candidate_regions=2;
+  sandbox.run.full_scan_windows=100;
+  await vm.runInContext("refreshScreening()",sandbox);
+  assert.match(ids.get("batch-resume").textContent,/曲线优先/);
+  assert.match(ids.get("batch-estimate").textContent,/2 个候选段/);
+  assert.match(ids.get("batch-estimate").textContent,/未筛区段不代表无接触/);
+  ids.get("batch-scope").value="current";
+  await ids.get("batch-start").onclick();
+  const start=JSON.parse(sandbox.calls.find(c=>c.url==="api/screening").body);
+  assert.equal(start.pipeline,"curve_first");
+  assert.deepEqual(start.episodes,[0]);
+  ids.get("batch-scope").value="all";
+  sandbox.calls=[];
+  await ids.get("batch-start").onclick();
+  assert.equal(JSON.parse(sandbox.calls.find(c=>c.url==="api/screening").body).episodes,null);
   console.log("BATCH_UI_STATE_OK: ETA, episode badges, side-clock focus, manual interval action, saved-revision guard and resume controls");
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

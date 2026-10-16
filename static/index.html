@@ -6,10 +6,10 @@
 <main>
 <aside><p class="eyebrow">DATASET</p><h2>导入本地数据集</h2><label>LeRobot 数据集目录<input id="path" placeholder="/run/determined/NAS1/…/xarm7"></label><button id="import" class="primary wide">打开数据集</button><select id="recent"><option value="">最近导入</option></select><div id="dataset-info" class="muted">直接读取原始数据，标注单独保存。</div><div id="warning" class="warning" hidden></div><div class="section-title">EPISODES <span id="episode-count"></span></div><div id="episodes"></div></aside>
 <section class="workspace"><div class="workspace-head"><div><p class="eyebrow">REVIEW WORKSPACE</p><h1 id="title">选择数据集，开始标注</h1></div><span id="save-state" class="muted">尚未加载</span></div><p id="task" class="muted"></p>
-<div id="empty" class="empty"><span>◈</span><h2>每一次接触，都有明确的边界</h2><p>同步查看场景和触觉图像，用曲线复核，再逐帧确认。</p><div>01 模型初筛 <i>→</i> 02 曲线复筛 <i>→</i> 03 人工确认</div></div>
-<section id="batch-panel" class="card"><div class="card-head"><h3>全数据集一键筛查</h3><span class="pill">模型初筛 → 曲线复筛 → 人工选帧</span></div>
-<p class="muted">所有 Episode、左右侧从头到尾分窗检查；每窗连续帧，不按几秒抽样。不会覆盖已有标注，也不会自动确认标签。补充说明沿用右侧输入。</p>
-<div class="input-row"><label>覆盖方式<select id="batch-coverage"><option value="native">原始触觉逐帧（推荐，较慢）</option><option value="data">数据帧逐帧（较快，非触觉全帧）</option></select></label><button id="batch-start" class="primary">一键筛完所有 EP（左右侧）</button></div>
+<div id="empty" class="empty"><span>◈</span><h2>每一次接触，都有明确的边界</h2><p>同步查看场景和触觉图像，逐帧确认接触边界。</p><div>01 曲线圈段 <i>→</i> 02 模型筛候选 <i>→</i> 03 人工确认</div></div>
+<section id="batch-panel" class="card"><div class="card-head"><h3>曲线优先一键筛查</h3><span class="pill">曲线圈段 → 模型筛候选 → 人工选帧</span></div>
+<p class="muted">先读取左右侧曲线，圈出可能第一帧接触／离开的区段，再让模型检查候选段内的连续触觉帧。候选段默认前后各扩展 0.35 秒。未筛区段不代表无接触；缺失或无效曲线会提示人工检查。不会覆盖已有标注，补充说明沿用右侧输入。</p>
+<div class="input-row"><label>筛查范围<select id="batch-scope"><option value="all">全部 EP（左右侧）</option><option value="current">先试当前 EP（左右侧）</option></select></label><button id="batch-start" class="primary">开始曲线 → 模型筛查</button></div>
 <div class="input-row"><button id="batch-stop" hidden>停止（保留进度）</button><button id="batch-resume" hidden>继续上次筛查</button></div>
 <progress id="batch-progress" max="1" value="0"></progress><p id="batch-status" role="status">请先导入数据集。</p><p id="batch-estimate" class="muted">预计剩余时间：开始处理后按实际速度估算。</p><p id="batch-error" class="warning" hidden></p>
 </section>

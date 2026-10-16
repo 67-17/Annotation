@@ -12,22 +12,25 @@ function durationLabel(seconds) {
 function renderScreeningStatus() {
   const active = screeningActive(screening);
   $("batch-start").disabled = !ds || active;
-  $("batch-coverage").disabled = !!active;
+  $("batch-scope").disabled = !!active;
   $("batch-stop").hidden = !active;
   $("batch-stop").disabled = screening?.state === "stopping";
   $("batch-resume").hidden = !screening || !["cancelled", "interrupted", "error"].includes(screening.state);
+  $("batch-resume").textContent = screening?.options?.pipeline === "curve_first" ? "继续曲线优先筛查" : "继续旧全帧筛查（较慢）";
   $("batch-error").hidden = !screening?.error;
   $("batch-error").textContent = screening?.error || "";
   $("batch-progress").max = screening?.total_windows || 1;
   $("batch-progress").value = screening?.done_windows || 0;
   if (!screening) {
-    $("batch-status").textContent = ds ? "尚未筛查。自动候选不会覆盖人工标注。" : "请先导入数据集。";
+    $("batch-status").textContent = ds ? "尚未筛查。开始后先圈定曲线候选段，再交给模型。" : "请先导入数据集。";
     $("batch-estimate").textContent = "预计剩余时间：开始处理后按实际速度估算。";
   } else {
-    const names = {queued:"等待开始", planning:"统计完整帧数…", running:"筛查中", stopping:"当前窗口结束后停止…", cancelled:"已停止，进度已保存", interrupted:"上次服务中断，可继续", error:"筛查出错，进度已保存", done:"自动筛查完成，等待人工复核"};
+    const curveFirst = screening.options.pipeline === "curve_first";
+    const names = {queued:"等待开始", planning:curveFirst ? `曲线圈段中 · ${screening.planned_units || 0}/${screening.total_units || "…"} 侧/EP` : "统计完整帧数…", running:curveFirst ? "模型筛候选段中" : "旧全帧筛查中", stopping:"当前窗口结束后停止…", cancelled:"已停止，进度已保存", interrupted:"上次服务中断，可继续", error:"筛查出错，进度已保存", done:"自动筛查完成，等待人工复核"};
     const here = screening.current;
     $("batch-status").textContent = `${names[screening.state] || screening.state} · ${screening.done_windows}/${screening.total_windows ?? "…"} 窗口 · ${screening.done_units}/${screening.total_units} 侧/EP${active && here ? ` · EP ${here.episode} ${here.side === "left" ? "左" : "右"} ${here.start.toFixed(2)}–${here.end.toFixed(2)}s` : ""}`;
-    $("batch-estimate").textContent = `${screening.options.coverage === "native" ? "原始触觉逐帧" : "数据帧逐帧（不是触觉全帧）"} · 预计剩余：${active ? durationLabel(screening.eta_seconds) : screening.state === "done" ? "自动筛查已结束" : "已暂停"} · 已计处理 ${durationLabel(screening.processing_seconds).replace("约 ", "")}。估算含图像读取和推理，不含人工复核；负载或错误会影响估算。${screening.failed_windows ? ` ${screening.failed_windows} 个窗口失败／格式无效，不能按无接触处理。` : ""}`;
+    const method = curveFirst ? `曲线 → 模型 · ${screening.candidate_regions ?? "…"} 个候选段${screening.full_scan_windows != null ? ` · ${screening.total_windows}/${screening.full_scan_windows} 个全帧窗口` : ""} · 未筛区段不代表无接触` : "旧全帧任务；点开始可创建曲线优先任务";
+    $("batch-estimate").textContent = `${method} · 预计剩余：${active ? durationLabel(screening.eta_seconds) : screening.state === "done" ? "自动筛查已结束" : "已暂停"} · 已计处理 ${durationLabel(screening.processing_seconds).replace("约 ", "")}。估算含图像读取和推理，不含人工复核；负载或错误会影响估算。${screening.failed_windows ? ` ${screening.failed_windows} 个窗口失败／格式无效，不能按无接触处理。` : ""}`;
   }
   document.querySelectorAll("#episodes button").forEach(b => {
     if (!b.dataset.baseLabel) b.dataset.baseLabel = b.textContent;
@@ -41,7 +44,7 @@ function renderScreeningStatus() {
 function renderScreeningEvents() {
   const all = screeningResults.flatMap(r => r.events || []);
   const visible = all.filter(e => $("batch-show-reviewed").checked || !e.reviewed);
-  $("batch-review-summary").textContent = screeningResults.length ? `${screeningResults.filter(r => r.state === "done").length}/2 侧已完成 · ${all.filter(e => !e.reviewed).length} 处待复核 · 橙色为疑点，虚线为候选边界。${screeningResults.some(r => r.machine_no_contact) ? " 某侧模型判断全程无接触，仍未人工确认。" : ""}` : "本 EP 暂无已完成筛查结果；完成一侧后自动显示。";
+  $("batch-review-summary").textContent = screeningResults.length ? `${screeningResults.filter(r => r.state === "done").length}/2 侧已完成 · ${all.filter(e => !e.reviewed).length} 处待复核 · 橙色为疑点，虚线为候选边界。${screening?.options.pipeline === "curve_first" ? " 仅检查曲线候选段，未筛区段仍需留意漏检。" : ""}${screeningResults.some(r => r.machine_no_contact) ? " 某侧模型判断全程无接触，仍未人工确认。" : ""}` : "本 EP 暂无已完成筛查结果；完成一侧后自动显示。";
   $("batch-events").replaceChildren(...visible.slice(0, screeningLimit).map(e => {
     const box = element("div", undefined, "screening-event" + (e.reviewed ? " reviewed" : "") + (focusedScreening === e.id ? " focused" : ""));
     const head = element("div", undefined, "card-head");
@@ -106,7 +109,8 @@ async function refreshScreening() {
 $("batch-start").onclick = guarded(async () => {
   if (!ds) throw Error("请先导入数据集");
   if (dirty) throw Error("请先保存人工标注，再开始筛查");
-  const run = await api("api/screening", {method:"POST",body:JSON.stringify({dataset:ds.id,coverage:$("batch-coverage").value,frames:6,camera:$("model-camera").value,prompt:$("prompt").value})});
+  if ($("batch-scope").value === "current" && !ep) throw Error("请先选择要测试的 EP");
+  const run = await api("api/screening", {method:"POST",body:JSON.stringify({dataset:ds.id,pipeline:"curve_first",episodes:$("batch-scope").value === "current" ? [ep.id] : null,coverage:"native",frames:6,camera:$("model-camera").value,prompt:$("prompt").value})});
   screening = run;renderScreeningStatus();await refreshScreening();
 });
 $("batch-stop").onclick = guarded(async () => {await api(`api/screening/${screening.id}/stop`, {method:"POST"});await refreshScreening();});

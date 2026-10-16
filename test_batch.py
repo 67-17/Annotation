@@ -10,12 +10,15 @@ from unittest.mock import patch
 import numpy as np
 
 import app as service
-from batch import BatchManager, merge_state, parse_states, screening_result, windows
+from batch import BatchManager, curve_first_result, merge_state, parse_states, screening_result, unit_windows, windows
 from test_annotation import request
 
 
 class FakeDataset:
     episodes = {0: {}, 1: {}}
+
+    def summary(self):
+        return {"id": "ds", "path": "/fake"}
 
     def episode_meta(self, ep):
         return {"tasks": ["只判断目标插头"], "length": 4}
@@ -107,6 +110,18 @@ class AlgorithmTests(unittest.TestCase):
         boundaries = [e for e in result["events"] if e["priority"] == "boundary"]
         self.assertEqual(len(boundaries),2)
         self.assertTrue(all("模型" in e["reason"] and "曲线" in e["reason"] for e in boundaries))
+
+    def test_curve_regions_never_infer_a_transition_across_unseen_gap(self):
+        unit = {"episode":0,"side":"left","pipeline":"curve_first","duration":6,
+                "times":[0,1,5,6],"states":["no_contact","no_contact","contact","contact"],
+                "warnings":[],"curves":[],"regions":[
+                    {"id":"a","first":0,"end_index":2,"boundaries":[{"curve":"load","kind":"contact_start","bracket_start":0,"bracket_end":1}]},
+                    {"id":"b","first":2,"end_index":4,"boundaries":[{"curve":"load","kind":"contact_end","bracket_start":5,"bracket_end":6}]}]}
+        self.assertEqual(unit_windows(unit,6),[(0,2),(2,4)])
+        result = curve_first_result(unit)
+        self.assertFalse(result["machine_no_contact"])
+        self.assertEqual(len(result["events"]),2)
+        self.assertTrue(all(not e["model_boundaries"] and e["priority"] == "high" for e in result["events"]))
 
 
 class ManagerTests(unittest.TestCase):
@@ -259,6 +274,74 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(resumed["id"],run["id"])
         self.assertTrue(finished.wait(5))
         self.assertEqual(self.manager.get(run["id"])["state"],"done")
+
+    def configure_curve_first(self):
+        self.ds.rows = lambda ep:[{"timestamp":i/20} for i in range(200)]
+        self.ds.samples = lambda ep,side:[{"time":i/20} for i in range(200)]
+        self.ds.curves = lambda ep:[{"side":side,"name":side+"/load","unit":"N",
+                                   "points":[[i/20, int(40 <= i < 60)] for i in range(200)]}
+                                  for side in ("left","right")]
+        self.options.update(pipeline="curve_first", frames=6)
+        self.manager.put_run(self.run)
+
+    def test_curve_first_only_candidate_frames_and_annotations_preserved(self):
+        self.configure_curve_first()
+        with service.db() as conn:
+            conn.execute("INSERT INTO annotations VALUES (?,?,?,?)", ("ds",0,1,'{"intervals":[{"id":"human"}]}'))
+        result = self.work()
+        self.assertEqual(result["state"],"done")
+        self.assertLess(result["total_windows"], result["full_scan_windows"] / 2)
+        self.assertEqual(result["candidate_regions"],8)
+        self.assertEqual(result["done_windows"],len(self.model.calls))
+        for unit in self.manager.units("test"):
+            self.assertFalse(unit["result"]["machine_no_contact"])
+            self.assertEqual(unit["state"],"done")
+            for first,end in unit_windows(unit,6):
+                times=unit["times"][first:end]
+                self.assertTrue(all(b-a < .051 for a,b in zip(times,times[1:])))
+                self.assertTrue(all(1.5 < t < 3.5 for t in times))
+            self.assertEqual(len(unit["result"]["events"]),2)
+        with service.db() as conn:
+            self.assertIn('"human"',conn.execute("SELECT body FROM annotations").fetchone()[0])
+
+    def test_curve_first_stop_resume_keeps_completed_windows(self):
+        self.configure_curve_first()
+        self.model.callback=lambda:self.manager.cancel("test")
+        result=self.work()
+        self.assertEqual(result["state"],"cancelled")
+        self.assertEqual(result["done_windows"],1)
+        self.model.callback=None
+        run=self.manager.get("test")
+        run["state"]="queued"
+        self.manager.put_run(run)
+        result=self.work()
+        self.assertEqual(result["state"],"done")
+        self.assertEqual(len(self.model.calls),result["total_windows"])
+
+    def test_curve_first_flat_curves_flagged_without_gpu_or_no_contact_claim(self):
+        self.configure_curve_first()
+        self.ds.curves=lambda ep:[]
+        result=self.work()
+        self.assertEqual(result["state"],"done")
+        self.assertEqual(result["total_windows"],0)
+        self.assertEqual(len(self.model.calls),0)
+        for unit in self.manager.units("test"):
+            self.assertFalse(unit["result"]["machine_no_contact"])
+            self.assertEqual(unit["result"]["events"][0]["end"],9.95)
+
+    def test_curve_first_current_episode_selection_and_api_default(self):
+        self.configure_curve_first()
+        self.options["episodes"]=[1]
+        self.manager.put_run(self.run)
+        result=self.work()
+        self.assertEqual(result["total_units"],2)
+        self.assertTrue(all(u["episode"] == 1 for u in self.manager.units("test")))
+        with patch.object(service,"dataset",return_value=self.ds), patch.object(self.manager,"launch",return_value={"id":"new"}) as launch:
+            status,_=asyncio.run(request("POST","/api/screening",{"dataset":"ds","episodes":[0]}))
+            self.assertEqual(status,202)
+            self.assertEqual(launch.call_args.args[1]["pipeline"],"curve_first")
+            status,_=asyncio.run(request("POST","/api/screening",{"dataset":"ds","episodes":[99]}))
+            self.assertEqual(status,400)
 
 
 if __name__ == "__main__":
