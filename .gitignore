@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.venv-det/
+state/
+verification/
+determined-checkpoints/
+.env
+.env.*
+!.env.example

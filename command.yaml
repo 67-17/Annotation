@@ -1,0 +1,25 @@
+description: liushiqi Contact Lab / Qwen3-VL-8B
+bind_mounts:
+  - host_path: /mount/NAS1/public
+    container_path: /run/determined/NAS1/public
+    read_only: true
+  - host_path: /mount/HOME/liushiqi
+    container_path: /home/liushiqi
+    read_only: false
+resources:
+  resource_pool: amp-48g
+  slots: 1
+environment:
+  image: 10.130.130.5:8192/lab-dev:latest
+  ports:
+    contact_web: 8088
+  proxy_ports:
+    - proxy_port: 8088
+      proxy_tcp: true
+  environment_variables:
+    - ANNOTATION_STATE_DIR=/home/liushiqi/Annotation/state
+    - MODEL_PATH=/run/determined/NAS1/public/HuggingFace/Qwen/Qwen3-VL-8B-Instruct
+    - PRELOAD_MODEL=1
+    - WEB_HOST=0.0.0.0
+    - WEB_PORT=8088
+    - SMOKE_DATASET=/run/determined/NAS1/public/xihang/data-mechanism/r2s2r-runs/plug_insert_v3/prod50_s1000/export_tmp_20261014T234707/xarm7

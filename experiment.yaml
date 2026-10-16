@@ -1,0 +1,44 @@
+name: liushiqi-qwen3-vl-contact-annotation
+description: Independent contact annotation web application and local Qwen3-VL-8B inference
+entrypoint: bash start.sh
+# Fail once while bringing up the service instead of retrying missing mounts.
+max_restarts: 0
+bind_mounts:
+  # Cluster NAS convention; validate this source on the assigned GPU node.
+  - host_path: /mount/NAS1/public
+    container_path: /run/determined/NAS1/public
+    read_only: true
+  - host_path: /mount/HOME/liushiqi
+    container_path: /home/liushiqi
+    read_only: false
+# Override the master's stale shared_fs default. This is the LDAP home
+# path on GPU hosts, not the /home/liushiqi path inside the dev container.
+checkpoint_storage:
+  type: shared_fs
+  host_path: /mount/HOME/liushiqi
+  storage_path: Annotation/determined-checkpoints
+resources:
+  resource_pool: amp-48g
+  slots_per_trial: 1
+searcher:
+  name: single
+  metric: service_ready
+  smaller_is_better: false
+  max_length:
+    batches: 1
+environment:
+  image: 10.130.130.5:8192/lab-dev:latest
+  ports:
+    contact_web: 8088
+  # Publishing a container port alone does not register a master proxy.
+  # TCP proxy mode is required by the CLI WebSocket tunnel.
+  proxy_ports:
+    - proxy_port: 8088
+      proxy_tcp: true
+  environment_variables:
+    - ANNOTATION_STATE_DIR=/home/liushiqi/Annotation/state
+    - MODEL_PATH=/run/determined/NAS1/public/HuggingFace/Qwen/Qwen3-VL-8B-Instruct
+    - PRELOAD_MODEL=1
+    - WEB_HOST=0.0.0.0
+    - WEB_PORT=8088
+    - SMOKE_DATASET=/run/determined/NAS1/public/xihang/data-mechanism/r2s2r-runs/plug_insert_v3/prod50_s1000/export_tmp_20261014T234707/xarm7
