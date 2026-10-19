@@ -33,4 +33,25 @@ fi
 "$annotation_python" -c 'import torch,transformers; from transformers import Qwen3VLForConditionalGeneration; print({"torch":torch.__version__,"transformers":transformers.__version__,"cuda":torch.cuda.is_available()}); assert torch.cuda.is_available(), "CUDA is unavailable in the allocated task"'
 echo "Contact Lab: host=${WEB_HOST:-127.0.0.1} port=${WEB_PORT:-8088} state=$ANNOTATION_STATE_DIR"
 echo "After model startup, look for MODEL_SMOKE_OK in task logs. This is a long-running service; stop the task when finished."
-exec "$annotation_python" -m uvicorn app:app --host "${WEB_HOST:-127.0.0.1}" --port "${WEB_PORT:-8088}" --workers 1
+annotation_source="${ANNOTATION_SOURCE_DIR:-/home/liushiqi/Annotation}"
+if [[ ! -r "$annotation_source/app.py" || ! -r "$annotation_source/backend/app.py" ]]; then
+  annotation_source="$PWD"
+fi
+annotation_reload_file="$ANNOTATION_STATE_DIR/reload-token"
+if [[ ! -s "$annotation_reload_file" ]]; then
+  "$annotation_python" -c 'import secrets,sys; open(sys.argv[1],"w").write(secrets.token_urlsafe(32))' "$annotation_reload_file"
+  chmod 600 "$annotation_reload_file"
+fi
+export ANNOTATION_RELOAD_TOKEN="$(<"$annotation_reload_file")"
+echo "SOURCE_READY source=$annotation_source manual_reload=$annotation_reload_file"
+while true; do
+  set +e
+  (cd -- "$annotation_source" && "$annotation_python" -m uvicorn app:app \
+    --host "${WEB_HOST:-127.0.0.1}" --port "${WEB_PORT:-8088}" --workers 1)
+  annotation_exit=$?
+  set -e
+  if [[ "$annotation_exit" != 75 ]]; then
+    exit "$annotation_exit"
+  fi
+  echo "MANUAL_RELOAD requested; restarting from $annotation_source"
+done

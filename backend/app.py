@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -8,7 +9,7 @@ from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -217,6 +218,25 @@ def health():
     return {"ok": True, "model": MODEL.status(), "screening_pipeline": "curve_first"}
 
 
+def exit_for_reload():
+    time.sleep(.2)  # Let the HTTP response reach the caller first.
+    os._exit(75)
+
+
+@app.post("/api/admin/reload")
+def reload_service(x_annotation_reload_token: str = Header(default="")):
+    token = os.environ.get("ANNOTATION_RELOAD_TOKEN", "")
+    if not token or not secrets.compare_digest(token, x_annotation_reload_token):
+        raise HTTPException(403, "无效的重载令牌")
+    with JOBS_LOCK:
+        batch_stopping = BATCH.busy() and BATCH.get(BATCH.active_id)["state"] == "stopping"
+        if ((BATCH.busy() and not batch_stopping)
+                or any(j["state"] in ("queued", "running") for j in JOBS.values())):
+            raise HTTPException(409, "请先停止筛查或模型任务，等待状态变为已停止后再更新")
+    threading.Thread(target=exit_for_reload, daemon=True).start()
+    return {"ok": True, "message": "服务将重新加载共享目录中的代码；标注和筛查进度保留"}
+
+
 @app.post("/api/datasets")
 def import_dataset(body: ImportBody):
     loaded = Dataset(body.path)
@@ -280,9 +300,11 @@ def save_annotations(identity: str, ep: int, body: SaveBody):
             raise ValueError("请使用数据时钟或对应侧触觉时钟")
         if (item.start is not None and item.starts_before) or (item.end is not None and item.ends_after):
             raise ValueError("边界帧和越界状态不能同时设置")
-        if item.confirmed and ((item.start is None and not item.starts_before) or (item.end is None and not item.ends_after)):
-            raise ValueError("确认前请补全边界，或标记开头已接触 / 结束仍接触")
         record = item.model_dump()
+        # Complete boundaries are exportable automatically. Incomplete pairs
+        # remain saved drafts without requiring a separate confirmation box.
+        record["confirmed"] = ((item.start is not None or item.starts_before)
+                               and (item.end is not None or item.ends_after))
         record["start_anchor"] = ds.snap(ep, item.start, item.clock) if item.start is not None else None
         record["end_anchor"] = ds.snap(ep, item.end, item.clock) if item.end is not None else None
         for name in ("start", "end"):

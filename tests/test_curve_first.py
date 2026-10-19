@@ -32,6 +32,8 @@ class Curves(unittest.TestCase):
     def test_initial_contact_and_one_frame_pulse_not_dropped(self):
         candidates,_ = curve_boundaries(self.curve([1,1,0,0,0,0]))
         self.assertTrue(candidates[0]["starts_before_possible"])
+        self.assertIs(type(candidates[0]["starts_before_possible"]), bool)
+        json.dumps(candidates)
         candidates,_ = curve_boundaries(self.curve([0,0,1,0,0,0]))
         self.assertTrue(any(c["kind"] == "short_excursion" for c in candidates))
 
@@ -79,6 +81,7 @@ class Planner(unittest.TestCase):
 
     def test_only_merged_candidate_frames_with_no_gaps(self):
         report = self.plan()
+        json.dumps(report)
         self.assertEqual(len(report["units"]),4)
         for unit in report["units"]:
             for region in unit["regions"]:

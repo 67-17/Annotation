@@ -54,7 +54,7 @@ async function main(){
   assert.equal(run("item.start"),null);
   run('displayedFrame=frameTarget;setBoundary(item,"start")');assert.equal(run("item.start"),1);
   run('setBoundary(item,"start")');assert.equal(run("item.start"),null);
-  // A suggested boundary stays unconfirmed and a second click removes it.
+  // A suggested boundary remains a draft until both boundaries are saved.
   run('seek=t=>{current=t;frameTarget={version:loadVersion,time:t};displayedFrame=frameTarget};');
   await run('markScreeningCandidate({id:"candidate",side:"left"},"start",1,"curve")');
   assert.equal(run('ann.intervals.find(i=>i.id==="screening-candidate").start'),1);
@@ -71,6 +71,7 @@ async function main(){
   assert.equal(run('ann.intervals.length'),1);
   assert.equal(run('ann.intervals[0].start'),1);
   assert.equal(run('ann.intervals[0].end'),2);
+  assert.doesNotMatch(source,/人工已确认/);
   // Restarting playback must not revive the previous animation loop.
   sandbox.seeks=[];run('seek=t=>{current=t;seeks.push(t)};current=0;play();stopPlayback();play();');
   const oldTick=ticks.shift(),newTick=ticks.shift();oldTick(500);assert.equal(sandbox.seeks.length,0);

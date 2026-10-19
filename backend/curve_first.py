@@ -70,7 +70,8 @@ def curve_boundaries(curve, padding=.35, on_ratio=.1, off_ratio=.02):
         else:
             while first > 0 and values[first] > off:
                 first -= 1
-            add("contact_start", first, boundary, starts_before_possible=first == 0 and values[0] >= on)
+            add("contact_start", first, boundary,
+                starts_before_possible=bool(first == 0 and values[0] >= on))
         active, run = not active, 0
     if active:
         add("episode_end", len(times) - 1, len(times) - 1, ends_after_possible=True)

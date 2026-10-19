@@ -137,13 +137,34 @@ class AnnotationTests(unittest.TestCase):
         self.assertEqual(exported["episodes"][0]["right"], [])
 
     def test_export_omits_drafts_and_screening_details(self):
-        self.save([self.interval(confirmed=False)])
+        self.save([self.interval(end=None, confirmed=False)])
         service.dataset(self.summary["id"]).episodes[1] = {"length": 0}
         exported = self.call("GET", f"/api/datasets/{self.summary['id']}/export")[1]
         self.assertEqual(exported, {"episodes": [
             {"episode": 0, "left": [], "right": []},
             {"episode": 1, "left": [], "right": []},
         ]})
+
+    def test_manual_reload_requires_token_and_idle_service(self):
+        with patch.dict(os.environ, ANNOTATION_RELOAD_TOKEN="secret"), \
+             patch.object(service.BATCH, "busy", return_value=False), \
+             patch.object(service.threading, "Thread") as thread:
+            with self.assertRaises(service.HTTPException) as rejected:
+                service.reload_service("wrong")
+            self.assertEqual(rejected.exception.status_code, 403)
+            result = service.reload_service("secret")
+        self.assertTrue(result["ok"])
+        thread.return_value.start.assert_called_once()
+
+    def test_manual_reload_can_break_a_stuck_stopping_screening(self):
+        with patch.dict(os.environ, ANNOTATION_RELOAD_TOKEN="secret"), \
+             patch.object(service.BATCH, "busy", return_value=True), \
+             patch.object(service.BATCH, "active_id", "run"), \
+             patch.object(service.BATCH, "get", return_value={"state": "stopping"}), \
+             patch.object(service.threading, "Thread") as thread:
+            result = service.reload_service("secret")
+        self.assertTrue(result["ok"])
+        thread.return_value.start.assert_called_once()
 
     def test_episode_can_load_frames_before_curves(self):
         with patch.object(Dataset, "curves", side_effect=RuntimeError("slow curves")):
@@ -168,9 +189,20 @@ class AnnotationTests(unittest.TestCase):
         self.assertEqual(self.save([], revision=0)[0], 409)
         self.assertEqual(len(self.call("GET", self.base + "/annotations")[1]["intervals"]), 1)
 
-    def test_invalid_confirmed_intervals_rejected(self):
-        for change in ({"end": None}, {"end": 1 / 60}, {"clock": "right"},
-                       {"start": -1}, {"starts_before": True}):
+    def test_incomplete_boundary_is_saved_as_draft_without_confirmation(self):
+        for revision, change in enumerate(({"start": None}, {"end": None})):
+            with self.subTest(change=change):
+                status, result = self.save([self.interval(**change)], revision=revision)
+                self.assertEqual(status, 200)
+                self.assertFalse(result["intervals"][0]["confirmed"])
+
+    def test_complete_boundary_is_confirmed_automatically(self):
+        status, result = self.save([self.interval(confirmed=False)])
+        self.assertEqual(status, 200)
+        self.assertTrue(result["intervals"][0]["confirmed"])
+
+    def test_invalid_intervals_rejected(self):
+        for change in ({"end": 1 / 60}, {"clock": "right"}, {"start": -1}, {"starts_before": True}):
             with self.subTest(change=change):
                 self.assertEqual(self.save([self.interval(**change)])[0], 400)
 

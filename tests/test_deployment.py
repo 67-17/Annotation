@@ -35,6 +35,9 @@ if "create" in sys.argv:
                              "static/index.html", "static/app.js", "requirements.txt"} <= files)
             self.assertFalse(any(p.startswith(("state/", "tests/", "docs/", ".venv", "determined-checkpoints/")) for p in files))
             self.assertEqual(Path(result["config"]), ROOT / "configs/experiment.yaml")
+            start = (Path(result["context"]) / "scripts/start.sh").read_text()
+            self.assertIn("ANNOTATION_SOURCE_DIR", start)
+            self.assertIn("MANUAL_RELOAD", start)
             # Import the staged service itself with an isolated state directory.
             env["ANNOTATION_STATE_DIR"] = str(directory / "isolated-state")
             subprocess.run([sys.executable, "-c", "from app import app; assert app"],

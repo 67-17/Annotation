@@ -31,6 +31,16 @@ curl --noproxy '*' --max-time 15 http://127.0.0.1:8088/api/health
 
 保持转发终端打开；笔记本再通过 SSH 转发远程开发环境的 8088。完整命令与操作步骤见 [使用和部署指南](docs/guide.md)。
 
+部署一次支持手动重载的版本后，普通前端／后端代码更新不必创建新实验。保持
+现有 `attach.py` 转发，在筛查和模型任务空闲时执行：
+
+```bash
+bash scripts/reload.sh
+```
+
+服务会从共享项目目录重新读取代码，标注与筛查进度保留。等待日志再次出现
+`MODEL_SMOKE_OK` 后刷新网页。依赖、启动脚本或实验配置变化仍需重新部署。
+
 曲线独立脚本改为模块启动：`python -m backend.curve_first --help`。诊断工具在 `scripts/`，例如 `python scripts/inspect_mounts.py <实验ID>`。
 
 ## 开发检查
@@ -43,7 +53,7 @@ python -m unittest tests.test_annotation tests.test_batch tests.test_curve_first
 node tests/test_review_ui.js
 node tests/test_batch_ui.js
 node tests/test_async_ui.js
-bash -n start.sh submit.sh scripts/start.sh scripts/submit.sh
+bash -n start.sh submit.sh scripts/start.sh scripts/submit.sh scripts/reload.sh
 ```
 
-本地源文件变更需重新部署后才会应用到已运行的 Determined 容器。标注数据库与筛查历史保留原路径。
+首次启用手动重载仍需部署一次；此后普通源文件变更可用 `scripts/reload.sh` 应用。标注数据库与筛查历史保留原路径。
