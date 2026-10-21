@@ -461,10 +461,16 @@ class BatchManager:
                                 if cam:
                                     pixels, frame = ds.frame(ep, cam["key"], t)
                                     images.append((f"index={index-first} time={t:.6f}s camera={cam['name']} frame={frame}", pixels))
+                        mode_instruction = (
+                            "本任务是多段筛查：一个 Episode 可能重复多次接触、离开和回位；必须保留每一次状态变化，不能只关注首次接触和最后一次离开。"
+                            if run["options"].get("contact_mode") == "multiple" else
+                            "本任务是单段筛查，预期每侧至多一个接触区间；仍须依据图像逐帧如实判断。"
+                        )
                         prompt = (
                             f"你是双侧机器人物理接触筛查助手。仅判断 {side} 侧夹爪与任务目标的接触。"
                             f"任务上下文：{ds.episode_meta(ep).get('tasks', [])}。"
                             "场景图像提供上下文，photon 为本侧触觉图像。闭爪不等于接触，不要把桌面接触当成目标接触。"
+                            + mode_instruction +
                             f"按 index=0 到 {end-first-1} 逐帧判断；不要漏掉任何 index。"
                             "只能输出 JSON 对象 {\"states\":[...]}。每项只允许 contact、no_contact、uncertain，"
                             "states 数量必须等于时间点数量，而非图片数量。无法判断填 uncertain，不编造边界。\n"

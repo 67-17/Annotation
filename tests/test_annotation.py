@@ -116,9 +116,10 @@ class AnnotationTests(unittest.TestCase):
         return {"id": "one", "side": "left", "clock": "left", "start": 1 / 60,
                 "end": 6 / 60, "confirmed": True, **changes}
 
-    def save(self, intervals, revision=0, no_contact=None):
+    def save(self, intervals, revision=0, no_contact=None, mode="single"):
         return self.call("PUT", self.base + "/annotations", {
-            "revision": revision, "intervals": intervals, "no_contact": no_contact or []})
+            "revision": revision, "mode": mode,
+            "intervals": intervals, "no_contact": no_contact or []})
 
     def test_native_anchor_retains_subframe_precision(self):
         status, result = self.save([self.interval()])
@@ -136,12 +137,18 @@ class AnnotationTests(unittest.TestCase):
         self.assertEqual(exported["episodes"][0]["left"][0]["release_frame"], 6)
         self.assertEqual(exported["episodes"][0]["right"], [])
 
-    def test_export_omits_drafts_and_screening_details(self):
-        self.save([self.interval(end=None, confirmed=False)])
+    def test_export_keeps_partial_boundaries_and_omits_empty_drafts(self):
+        self.save([self.interval(end=None, confirmed=False),
+                   self.interval(id="empty", start=None, end=None, confirmed=False)],
+                  mode="multiple")
         service.dataset(self.summary["id"]).episodes[1] = {"length": 0}
         exported = self.call("GET", f"/api/datasets/{self.summary['id']}/export")[1]
         self.assertEqual(exported, {"episodes": [
-            {"episode": 0, "left": [], "right": []},
+            {"episode": 0, "left": [{
+                "clock": "left", "contact_time_s": 1 / 60,
+                "contact_frame": 1, "release_time_s": None,
+                "release_frame": None,
+            }], "right": []},
             {"episode": 1, "left": [], "right": []},
         ]})
 
@@ -207,8 +214,49 @@ class AnnotationTests(unittest.TestCase):
                 self.assertEqual(self.save([self.interval(**change)])[0], 400)
 
     def test_overlapping_confirmed_intervals_rejected(self):
-        status, _ = self.save([self.interval(), self.interval(id="two", start=2 / 60)])
+        status, _ = self.save([self.interval(), self.interval(id="two", start=2 / 60)], mode="multiple")
         self.assertEqual(status, 400)
+
+    def test_single_mode_rejects_second_interval(self):
+        intervals = [self.interval(), self.interval(id="two", start=7 / 60, end=8 / 60)]
+        self.assertEqual(self.save(intervals)[0], 400)
+
+    def test_old_screening_slot_duplicate_ids_are_repaired_on_save(self):
+        slot_id = "screening-slot-run-left-0"
+        intervals = [self.interval(id=slot_id),
+                     self.interval(id=slot_id, start=7 / 60, end=8 / 60)]
+        status, saved = self.save(intervals, mode="multiple")
+        self.assertEqual(status, 200)
+        self.assertEqual(len({item["id"] for item in saved["intervals"]}), 2)
+        for item, expected in zip(saved["intervals"], (1 / 60, 7 / 60)):
+            self.assertAlmostEqual(item["start"], expected)
+        reloaded = self.call("GET", self.base + "/annotations")[1]
+        self.assertEqual({item["id"] for item in reloaded["intervals"]},
+                         {item["id"] for item in saved["intervals"]})
+        self.assertEqual(self.save([self.interval(), self.interval(id="one", start=7 / 60,
+                                                                   end=8 / 60)], mode="multiple")[0], 400)
+
+    def test_multiple_mode_saves_and_exports_repeated_contacts_in_time_order(self):
+        intervals = [self.interval(id="two", start=7 / 60, end=8 / 60), self.interval()]
+        status, saved = self.save(intervals, mode="multiple")
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["mode"], "multiple")
+        self.assertEqual([item["id"] for item in saved["intervals"]], ["one", "two"])
+        exported = self.call("GET", f"/api/datasets/{self.summary['id']}/export")[1]
+        self.assertEqual([item["contact_frame"] for item in exported["episodes"][0]["left"]], [1, 7])
+        with service.db() as conn:
+            conn.execute("DELETE FROM annotations WHERE dataset=?", (self.summary["id"],))
+        self.assertEqual(self.call("GET", self.base + "/annotations")[1]["mode"], "multiple")
+
+    def test_legacy_multiple_annotations_infer_multiple_mode(self):
+        body = {"intervals": [self.interval(), self.interval(id="two", start=7 / 60, end=8 / 60)],
+                "no_contact": []}
+        with service.db() as conn:
+            conn.execute("INSERT INTO annotations VALUES (?,?,?,?)",
+                         (self.summary["id"], 0, 1, json.dumps(body)))
+        status, saved = self.call("GET", self.base + "/annotations")
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["mode"], "multiple")
 
     def test_no_contact_conflict_rejected(self):
         self.assertEqual(self.save([self.interval()], no_contact=["left"])[0], 400)

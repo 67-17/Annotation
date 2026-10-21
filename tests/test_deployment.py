@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 
+import yaml
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -42,6 +44,21 @@ if "create" in sys.argv:
             env["ANNOTATION_STATE_DIR"] = str(directory / "isolated-state")
             subprocess.run([sys.executable, "-c", "from app import app; assert app"],
                            cwd=result["context"], env=env, check=True, capture_output=True, timeout=20)
+
+    def test_named_instance_uses_an_isolated_state_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            output = directory / "experiment.yaml"
+            subprocess.run([
+                sys.executable, str(ROOT / "scripts/instance_config.py"),
+                str(ROOT / "configs/experiment.yaml"), str(output), "dataset-a",
+            ], check=True, capture_output=True, text=True, timeout=20)
+            config = yaml.safe_load(output.read_text())
+            self.assertTrue(config["name"].endswith("-dataset-a"))
+            self.assertIn(
+                "ANNOTATION_STATE_DIR=/home/liushiqi/Annotation/state-dataset-a",
+                config["environment"]["environment_variables"],
+            )
 
 
 if __name__ == "__main__":

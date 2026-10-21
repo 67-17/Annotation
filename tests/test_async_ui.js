@@ -2,14 +2,17 @@
 // Exercise delayed responses and edits without a network connection or GPU.
 const assert=require("node:assert/strict"),fs=require("node:fs"),vm=require("node:vm");
 const ids=new Map(),ticks=[];
+const domElement=(tag="div")=>({tag,textContent:"",value:"",checked:false,hidden:false,disabled:false,children:[],dataset:{},className:"",
+  classList:{toggle(){}},append(...children){this.children.push(...children)},replaceChildren(...children){this.children=children}});
 const sandbox={console,AbortController,setTimeout,clearTimeout,performance:{now:()=>0},
-  document:{getElementById(id){if(!ids.has(id))ids.set(id,{value:"",textContent:""});return ids.get(id);}},
+  document:{getElementById(id){if(!ids.has(id))ids.set(id,domElement());return ids.get(id);},
+    createElement:tag=>domElement(tag),createTextNode:text=>({textContent:text})},
   window:{dispatchEvent(){},location:{}},Event:class {},requestAnimationFrame:fn=>ticks.push(fn),renders:0};
 vm.createContext(sandbox);
 const source=fs.readFileSync(__dirname+"/../static/app.js","utf8");
 vm.runInContext(source.slice(0,source.indexOf('$("import").onclick=')),sandbox);
 const run=code=>vm.runInContext(code,sandbox);
-run('ds={id:"ds"};ep={id:0,duration:2,clocks:{data:[{time:0},{time:1},{time:2}]}};renderIntervals=()=>renders++;drawCurves=()=>{};toast=()=>{};ann={revision:0,intervals:[],no_contact:[]};dirty=true;');
+run('globalThis.realRenderIntervals=renderIntervals;ds={id:"ds"};ep={id:0,duration:2,clocks:{data:[{time:0},{time:1},{time:2}]}};renderIntervals=()=>renders++;drawCurves=()=>{};toast=()=>{};ann={revision:0,intervals:[],no_contact:[]};dirty=true;');
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
 async function main(){
   // A stalled fetch is aborted and the next request is still usable.
@@ -66,11 +69,62 @@ async function main(){
   await run('markScreeningCandidate({id:"second",side:"left"},"start",1,"curve")');
   assert.equal(run('ann.intervals.filter(i=>i.side==="left").length'),1);
   assert.equal(run('ann.intervals[0].source'),"manual");
-  run('ann.intervals=[{id:"manual",side:"right",clock:"data",start:1,end:null,confirmed:false,source:"manual"},{id:"curve",side:"right",clock:"data",start:null,end:2,confirmed:false,source:"curve"}];');
-  assert.equal(run('mergeComplementaryIntervals()'),true);
-  assert.equal(run('ann.intervals.length'),1);
-  assert.equal(run('ann.intervals[0].start'),1);
-  assert.equal(run('ann.intervals[0].end'),2);
+  // Multiple mode pairs every release with the nearest unfinished contact,
+  // while preserving earlier complete turns.
+  run('ann={revision:0,mode:"multiple",intervals:[],no_contact:[]};ep.clocks.data=[{time:0},{time:1},{time:2},{time:3}];');
+  await run('markScreeningCandidate({id:"turn-1-start",side:"left"},"start",0,"model")');
+  await run('markScreeningCandidate({id:"turn-1-end",side:"left"},"end",1,"model")');
+  await run('markScreeningCandidate({id:"turn-2-start",side:"left"},"start",2,"model")');
+  await run('markScreeningCandidate({id:"turn-2-end",side:"left"},"end",3,"model")');
+  assert.equal(run('ann.intervals.length'),2);
+  assert.equal(run('JSON.stringify(ann.intervals.map(i=>[i.start,i.end]))'),'[[0,1],[2,3]]');
+  run('renderIntervals=realRenderIntervals;renderIntervals()');
+  assert.equal(ids.get("intervals").children.length,3); // side controls + two paired contact rows
+  assert.equal(ids.get("intervals").children[1].children[0].textContent,"接触段 1");
+  assert.equal(ids.get("intervals").children[1].children[1].children.length,2); // left card + right placeholder
+  assert.equal(ids.get("intervals").children[1].children[1].children[0].children[0].children[0].textContent,"左侧");
+  assert.equal(ids.get("intervals").children[1].children[1].children[1].className,"interval-slot-empty");
+  sandbox.window.screeningBoundarySuggestion=(side,index,boundary)=>side==="left"&&index===0&&boundary==="start"?{event:{id:"suggestion",side:"left"},candidate:{origin:"模型"},time:0}:null;
+  sandbox.focusScreeningEvent=(_event,time)=>{sandbox.focusedTime=time;};
+  run('renderIntervals()');
+  const candidateRow=ids.get("intervals").children[1].children[1].children[0].children[1].children[0].children[4];
+  assert.equal(candidateRow.className,"boundary-candidate");
+  assert.match(candidateRow.children[0].textContent,/模型候选/);
+  await candidateRow.children[0].onclick();
+  assert.equal(sandbox.focusedTime,0);
+  delete sandbox.window.screeningBoundarySuggestion;
+  assert.equal(ids.get("mode-multiple").classList!==undefined,true);
+  assert.equal(run('screeningCandidateMarked("left","start",2)'),true);
+  assert.throws(()=>run('setAnnotationMode("single")'),/最多一个接触段/);
+  await run('markScreeningCandidate({id:"turn-2-start",side:"left"},"start",2,"model")');
+  assert.equal(run('ann.intervals[1].start'),null);
+  run('ann={revision:0,mode:"multiple",intervals:[],no_contact:[]};renderIntervals=()=>{}');
+  await run('markScreeningCandidate({id:"reverse-end",side:"right"},"end",3,"model")');
+  await run('markScreeningCandidate({id:"reverse-start",side:"right"},"start",2,"model")');
+  assert.equal(run('JSON.stringify(ann.intervals.map(i=>[i.start,i.end]))'),'[[2,3]]');
+  run('ann={revision:0,mode:"multiple",intervals:[],no_contact:[]};renderIntervals=()=>{};screeningSlotKey=null;screeningSlotDismissals={left:0,right:0};dirty=false;ensureScreeningSlots({left:3,right:2},"run-0")');
+  assert.equal(run('ann.intervals.filter(i=>i.side==="left").length'),3);
+  assert.equal(run('ann.intervals.filter(i=>i.side==="right").length'),2);
+  assert.equal(run('dirty'),false); // Empty screening slots are not saved edits.
+  run('ensureScreeningSlots({left:3,right:2},"run-0")');
+  assert.equal(run('dirty'),false);
+  run('ann={revision:0,mode:"multiple",intervals:[],no_contact:[]};screeningSlotKey=null;screeningSlotDismissals={left:0,right:0};ensureScreeningSlots({left:1,right:0},"growing-run");ann.intervals[0].start=0;ann.intervals[0].end=1;ensureScreeningSlots({left:2,right:0},"growing-run")');
+  assert.equal(run('ann.intervals.length'),2);
+  assert.equal(run('new Set(ann.intervals.map(i=>i.id)).size'),2);
+  run('ann.intervals=[];addInterval("left","manual",0,1,"screening-repeat");addInterval("left","model",2,3,"screening-repeat")');
+  assert.equal(run('new Set(ann.intervals.map(i=>i.id)).size'),2);
+  run('ann.intervals=[];screeningSlotKey=null;screeningSlotDismissals={left:0,right:0};ensureScreeningSlots({left:1,right:0},"growing-run");ann.intervals[0].start=0;ann.intervals[0].end=1;ensureScreeningSlots({left:2,right:0},"growing-run")');
+  run('ann.intervals[1].id=ann.intervals[0].id;ann.intervals[1].start=2;ann.intervals[1].end=3;dirty=true;api=async(_url,options)=>{globalThis.savedBody=JSON.parse(options.body);return {...savedBody,revision:1}}');
+  await run('save()');
+  assert.equal(run('new Set(savedBody.intervals.map(i=>i.id)).size'),2);
+  assert.equal(run('JSON.stringify(savedBody.intervals.map(i=>[i.start,i.end]))'),'[[0,1],[2,3]]');
+  assert.equal(run('dirty'),false);
+  run('ann={revision:0,mode:"multiple",intervals:[],no_contact:[]};screeningSlotKey=null;screeningSlotDismissals={left:0,right:0};dirty=false;ensureScreeningSlots({left:3,right:2},"run-0")');
+  run('renderIntervals=realRenderIntervals;renderIntervals()');
+  assert.equal(ids.get("intervals").children.length,4); // controls + contact segments 1, 2, 3
+  assert.equal(ids.get("intervals").children[3].children[0].textContent,"接触段 3");
+  assert.equal(ids.get("intervals").children[3].children[1].children[0].className,"interval");
+  assert.equal(ids.get("intervals").children[3].children[1].children[1].className,"interval-slot-empty");
   assert.doesNotMatch(source,/人工已确认/);
   // Restarting playback must not revive the previous animation loop.
   sandbox.seeks=[];run('seek=t=>{current=t;seeks.push(t)};current=0;play();stopPlayback();play();');

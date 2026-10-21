@@ -2,14 +2,14 @@
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Contact Lab · 接触标注</title><link rel="stylesheet" href="static/style.css"></head>
 <body>
-<header><div class="brand"><span class="logo">◈</span><div>CONTACT LAB<small>双侧接触 · 逐帧标注</small></div></div><div id="model-status" class="pill">正在检查模型…</div><button id="export" title="下载各 EP 已确认接触区间的时间和帧号，JSON 格式" disabled>下载标注 JSON ↓</button></header>
+<header><div class="brand"><span class="logo">◈</span><div>CONTACT LAB<small>双侧接触 · 逐帧标注</small></div></div><div id="model-status" class="pill">正在检查模型…</div><button id="export" title="下载各 EP 已标记边界的接触区间时间和帧号，JSON 格式" disabled>下载标注 JSON ↓</button></header>
 <main>
 <aside><p class="eyebrow">DATASET</p><h2>导入本地数据集</h2><label>LeRobot 数据集目录<input id="path" placeholder="/run/determined/NAS1/…/xarm7"></label><button id="import" class="primary wide">打开数据集</button><select id="recent"><option value="">最近导入</option></select><div id="dataset-info" class="muted">直接读取原始数据，标注单独保存。</div><div id="warning" class="warning" hidden></div><div class="section-title">EPISODES <span id="episode-count"></span></div><div id="episodes"></div></aside>
 <section class="workspace"><div class="workspace-head"><div><p class="eyebrow">REVIEW WORKSPACE</p><h1 id="title">选择数据集，开始标注</h1></div><span id="save-state" class="muted">尚未加载</span></div><p id="task" class="muted"></p>
 <div id="empty" class="empty"><span>◈</span><h2>每一次接触，都有明确的边界</h2><p>同步查看场景和触觉图像，逐帧确认接触边界。</p><div>01 曲线圈段 <i>→</i> 02 模型筛候选 <i>→</i> 03 人工确认</div></div>
 <section id="batch-panel" class="card"><div class="card-head"><h3>曲线优先一键筛查</h3><span class="pill">曲线圈段 → 模型筛候选 → 人工选帧</span></div>
 <p class="muted">先用曲线圈定候选段，再用模型筛查；未筛区段仍需留意漏检。自动结果不会覆盖人工标注。</p>
-<div class="batch-options"><label>场景相机<select id="model-camera"></select></label><label>接触目标说明<input id="prompt" type="text" placeholder="例如：只判断夹爪与黑色插头接触"></label></div>
+<div class="batch-options"><label>场景相机<select id="model-camera"></select></label><label>接触目标说明<input id="prompt" type="text" placeholder="例如：只判断夹爪与黑色插头接触"></label><div class="mode-option"><span>筛查与标注模式</span><div id="annotation-mode" class="segmented" aria-label="筛查与标注模式"><button id="mode-single" type="button">单段</button><button id="mode-multiple" type="button">多段</button></div></div></div>
 <div class="input-row"><label>筛查范围<select id="batch-scope"><option value="all">全部 EP（左右侧）</option><option value="current">先试当前 EP（左右侧）</option></select></label><button id="batch-start" class="primary">开始曲线 → 模型筛查</button></div>
 <div class="input-row"><button id="batch-stop" hidden>停止（保留进度）</button><button id="batch-resume" hidden>继续上次筛查</button><button id="batch-refresh">刷新进度</button></div>
 <progress id="batch-progress" max="1" value="0"></progress><p id="batch-status" role="status">请先导入数据集。</p><p id="batch-estimate" class="muted">预计剩余时间：开始处理后按实际速度估算。</p><p id="batch-error" class="warning" hidden></p>
@@ -20,9 +20,9 @@
 <div class="transport"><button id="previous" title="前一帧，←">←</button><button id="play">播放</button><button id="next" title="后一帧，→">→</button><select id="clock"><option value="data">数据帧</option></select><input id="seek" type="range" min="0" max="1" step="0.000001" value="0"><output id="position">0.000 s</output></div>
 <p id="frame-status" class="muted" role="status">选择时间，查看同步图像。</p></div>
 <div class="review-tools">
-<div class="card" id="curve-card"><div class="card-head"><h3>信号曲线</h3><span class="muted">拖动选帧 · ← / → 微调 · 各曲线独立纵轴</span></div><div id="curves"></div><p id="no-curves" class="muted" hidden>此数据集没有可直接展示的触觉数值曲线；可结合图像和夹爪位置人工检查。</p></div>
-<div class="card"><div class="card-head"><h3>接触边界</h3><button id="save" class="primary">保存标注</button></div><p class="muted">离开帧是第一帧未接触，区间为 [接触帧, 离开帧)。</p><div id="intervals"></div></div>
-<div class="card" id="batch-review"><div class="card-head"><h3>候选边界</h3></div><p id="batch-review-summary" class="muted">筛查完成后，这里显示可能的接触和离开第一帧。</p><div id="batch-events"></div><button id="batch-more" hidden>再显示 40 处</button></div>
+<div class="card" id="curve-card"><div class="card-head" id="curve-drag-handle"><h3>信号曲线</h3><div class="curve-window-controls"><label title="调整曲线窗口透明度">透明度 <input id="curve-opacity" type="range" min="30" max="100" value="95" aria-label="曲线窗口透明度"></label><button id="curve-collapse" type="button" title="收起曲线窗口" aria-label="收起曲线窗口">−</button></div></div><div id="curve-content"><div id="curves"></div><p id="no-curves" class="muted" hidden>此数据集没有可直接展示的触觉数值曲线；可结合图像和夹爪位置人工检查。</p></div></div>
+<div class="card"><div class="card-head"><h3>接触边界</h3><button id="save" class="primary">保存标注</button></div><p id="annotation-mode-note" class="muted">离开帧是第一帧未接触，区间为 [接触帧, 离开帧)。</p><div id="intervals"></div></div>
+<div class="card" id="batch-review"><div class="card-head"><h3>候选边界</h3></div><p id="batch-review-summary" class="muted">筛查完成后，候选按钮显示在上方对应的接触和离开框中。</p><div id="batch-events"></div><button id="batch-more" hidden>再显示 40 处</button></div>
 </div></div></section>
 </main><div id="toast" role="status" hidden></div><script src="static/app.js"></script><script src="static/batch.js"></script>
 </body></html>

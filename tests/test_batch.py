@@ -388,6 +388,11 @@ class ManagerTests(unittest.TestCase):
             status,_=asyncio.run(request("POST","/api/screening",{"dataset":"ds","episodes":[0]}))
             self.assertEqual(status,202)
             self.assertEqual(launch.call_args.args[1]["pipeline"],"curve_first")
+            self.assertEqual(launch.call_args.args[1]["contact_mode"],"single")
+            status,_=asyncio.run(request("POST","/api/screening",{
+                "dataset":"ds","episodes":[0],"contact_mode":"multiple"}))
+            self.assertEqual(status,202)
+            self.assertEqual(launch.call_args.args[1]["contact_mode"],"multiple")
             status,_=asyncio.run(request("POST","/api/screening",{"dataset":"ds","episodes":[99]}))
             self.assertEqual(status,400)
 

@@ -35,6 +35,7 @@ def db():
     try:
         with conn:
             conn.execute("CREATE TABLE IF NOT EXISTS datasets (id TEXT PRIMARY KEY, path TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS dataset_settings (dataset TEXT PRIMARY KEY, annotation_mode TEXT NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS annotations (dataset TEXT, episode INTEGER, revision INTEGER, body TEXT, PRIMARY KEY(dataset, episode))")
             yield conn
     finally:
@@ -118,6 +119,7 @@ class Interval(BaseModel):
 
 class SaveBody(BaseModel):
     revision: int = Field(ge=0)
+    mode: Literal["single", "multiple"] = "single"
     intervals: list[Interval] = Field(max_length=200)
     no_contact: list[Literal["left", "right"]] = Field(default_factory=list)
 
@@ -147,6 +149,7 @@ class CurveBody(BaseModel):
 class BatchBody(BaseModel):
     dataset: str
     pipeline: Literal["curve_first", "full"] = "curve_first"
+    contact_mode: Literal["single", "multiple"] = "single"
     episodes: list[int] | None = None
     coverage: Literal["native", "data"] = "native"
     frames: int = Field(default=6, ge=2, le=6)
@@ -281,7 +284,15 @@ def annotations(identity: str, ep: int):
     dataset(identity).episode_meta(ep)
     with db() as conn:
         row = conn.execute("SELECT revision,body FROM annotations WHERE dataset=? AND episode=?", (identity, ep)).fetchone()
-    return {"revision": row[0], **json.loads(row[1])} if row else {"revision": 0, "intervals": [], "no_contact": []}
+        setting = conn.execute("SELECT annotation_mode FROM dataset_settings WHERE dataset=?", (identity,)).fetchone()
+    if not row:
+        return {"revision": 0, "mode": setting[0] if setting else "single", "intervals": [], "no_contact": []}
+    saved = json.loads(row[1])
+    if "mode" not in saved:
+        counts = {side: sum(item.get("side") == side for item in saved.get("intervals", []))
+                  for side in ("left", "right")}
+        saved["mode"] = "multiple" if max(counts.values(), default=0) > 1 else "single"
+    return {"revision": row[0], **saved}
 
 
 @app.put("/api/datasets/{identity}/episodes/{ep}/annotations")
@@ -290,17 +301,23 @@ def save_annotations(identity: str, ep: int, body: SaveBody):
     ds.episode_meta(ep)
     records = []
     identities = set()
+    if body.mode == "single" and any(sum(item.side == side for item in body.intervals) > 1
+                                      for side in ("left", "right")):
+        raise ValueError("单段模式下每侧最多保留一个接触区间")
     for item in body.intervals:
-        if item.id in identities:
-            raise ValueError("标注 ID 重复")
-        identities.add(item.id)
+        record = item.model_dump()
+        if record["id"] in identities:
+            if not record["id"].startswith("screening-slot-"):
+                raise ValueError("标注 ID 重复")
+            while record["id"] in identities:
+                record["id"] = uuid.uuid4().hex
+        identities.add(record["id"])
         if item.side in body.no_contact:
             raise ValueError("同一侧不能同时存在接触区间和全程无接触标记")
         if item.clock not in ("data", item.side):
             raise ValueError("请使用数据时钟或对应侧触觉时钟")
         if (item.start is not None and item.starts_before) or (item.end is not None and item.ends_after):
             raise ValueError("边界帧和越界状态不能同时设置")
-        record = item.model_dump()
         # Complete boundaries are exportable automatically. Incomplete pairs
         # remain saved drafts without requiring a separate confirmation box.
         record["confirmed"] = ((item.start is not None or item.starts_before)
@@ -318,13 +335,18 @@ def save_annotations(identity: str, ep: int, body: SaveBody):
         for previous, current in zip(ordered, ordered[1:]):
             if previous["end"] is None or current["start"] is None or previous["end"] > current["start"]:
                 raise ValueError("同一侧已确认的接触区间不能重叠")
-    result = {"intervals": records, "no_contact": sorted(set(body.no_contact)), "updated_at": time.time()}
+    records.sort(key=lambda item: (item["side"], item["start"] is None,
+                                   item["start"] if item["start"] is not None else
+                                   item["end"] if item["end"] is not None else float("inf")))
+    result = {"mode": body.mode, "intervals": records,
+              "no_contact": sorted(set(body.no_contact)), "updated_at": time.time()}
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute("SELECT revision FROM annotations WHERE dataset=? AND episode=?", (identity, ep)).fetchone()
         revision = row[0] if row else 0
         if body.revision != revision:
             raise HTTPException(409, "标注已被其他窗口修改，请重新加载后再保存")
+        conn.execute("INSERT OR REPLACE INTO dataset_settings VALUES (?,?)", (identity, body.mode))
         conn.execute("INSERT OR REPLACE INTO annotations VALUES (?,?,?,?)", (identity, ep, revision + 1, json.dumps(result, ensure_ascii=False)))
     return {"revision": revision + 1, **result}
 
@@ -339,7 +361,16 @@ def export(identity: str):
     for episode in sorted(ds.episodes):
         result = {"episode": episode, "left": [], "right": []}
         for item in saved.get(episode, {}).get("intervals", []):
-            if not item.get("confirmed"):
+            # Export every interval with at least one manually marked boundary.
+            # An unfinished draft still contains useful information: for
+            # example, a contact first frame may be marked before the release
+            # first frame is found.  Empty screening slots remain omitted.
+            if not any((item.get("start") is not None,
+                        item.get("end") is not None,
+                        item.get("start_anchor") is not None,
+                        item.get("end_anchor") is not None,
+                        item.get("starts_before"),
+                        item.get("ends_after"))):
                 continue
             contact = item.get("start_anchor")
             release = item.get("end_anchor")
@@ -350,6 +381,8 @@ def export(identity: str):
                 "release_time_s": release["time"] if release else None,
                 "release_frame": release["sample_index"] if release else None,
             })
+        result["left"].sort(key=lambda item: item["contact_time_s"] if item["contact_time_s"] is not None else float("-inf"))
+        result["right"].sort(key=lambda item: item["contact_time_s"] if item["contact_time_s"] is not None else float("-inf"))
         episodes.append(result)
     result = {"episodes": episodes}
     return Response(json.dumps(result, ensure_ascii=False, indent=2), media_type="application/json",

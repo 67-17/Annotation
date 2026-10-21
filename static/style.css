@@ -33,18 +33,31 @@ main>aside{position:sticky;top:0;align-self:start;display:flex;flex-direction:co
 .review-dock #seek{grid-column:1/-1;grid-row:2;width:100%;margin:4px 0}
 #frame-status{padding:0 4px;font-variant-numeric:tabular-nums}
 .camera{position:relative}.camera-time{position:absolute;right:5px;bottom:5px;background:#09111bdd;color:var(--text);font-size:11px;padding:2px 5px;border-radius:3px;font-variant-numeric:tabular-nums}
-.batch-options{display:grid;grid-template-columns:minmax(180px,1fr) minmax(240px,2fr);gap:12px}.candidate-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:6px 0}.candidate-row button:first-child{white-space:normal;text-align:left;min-width:0}.candidate-row .muted{white-space:nowrap}
+.batch-options{display:grid;grid-template-columns:minmax(180px,1fr) minmax(240px,2fr) auto;gap:12px;align-items:end}.mode-option{color:var(--muted);font-size:12px;margin:12px 0}.mode-option .segmented{display:flex!important;margin-top:5px}.candidate-row{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:6px 0}.candidate-row button:first-child{white-space:normal;text-align:left;min-width:0}.candidate-row .muted{white-space:nowrap}
 .review-tools{min-width:0}
 .review-tools>.card:first-child{margin-top:0}
 .review-tools .card{padding:14px}
 .review-tools .card-head{flex-wrap:wrap}
 .review-tools .card-head>div{flex-wrap:wrap}
+.segmented{display:inline-flex!important;gap:0!important;border:1px solid var(--line);border-radius:6px;overflow:hidden}.segmented button{border:0;border-radius:0;background:#0a111c}.segmented button+button{border-left:1px solid var(--line)}.segmented button.active{background:#315f5a;color:#fff}.interval-side-controls{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.interval-side-control{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}.interval-side-control>div{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px}.interval-side-control label{margin:0}.interval-pair{border-top:1px solid var(--line);padding-top:10px;margin-top:10px}.interval-pair h4{margin:0 0 8px;font-size:13px}.interval-pair-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.interval{border:1px solid var(--line);border-radius:6px;padding:10px;min-width:0}.interval-slot-empty{display:flex;min-height:116px;flex-direction:column;align-items:flex-start;justify-content:center;gap:8px;border:1px dashed var(--line);border-radius:6px;padding:10px}.interval-empty{padding:12px 0;color:var(--muted);font-size:12px}.interval-remove{color:#f0b3b3}
 .review-tools .interval-fields{grid-template-columns:1fr}
 .review-tools .interval-footer{flex-wrap:wrap;gap:8px}
 .review-tools .interval-footer input[type=text]{flex-basis:100%}
 .review-tools canvas{touch-action:none}
 .review-tools canvas:focus-visible{outline:1px solid var(--accent)}
 #curve-card{scroll-margin-top:12px}
+#curve-card{position:fixed;top:110px;right:20px;z-index:8;width:min(760px,calc(100vw - 24px));height:min(570px,calc(100dvh - 130px));min-width:300px;min-height:56px;max-width:calc(100vw - 12px);max-height:calc(100dvh - 12px);margin:0;display:flex;flex-direction:column;resize:both;overflow:hidden;box-shadow:0 16px 48px #0009;background:#111925}
+#curve-card.collapsed{height:56px!important;min-height:56px;resize:none}
+#curve-card.collapsed #curve-content{display:none}
+#curve-drag-handle{flex:none;cursor:move;touch-action:none;user-select:none;min-height:32px}
+.curve-window-controls{display:flex;align-items:center;gap:8px}
+.curve-window-controls label{display:flex;align-items:center;gap:6px;margin:0;white-space:nowrap}
+.curve-window-controls input{width:90px;accent-color:var(--accent);cursor:pointer}
+.curve-window-controls button{width:28px;height:28px;padding:0;font-size:18px;line-height:1}
+#curve-content{flex:1;min-height:0;overflow:auto}
+.boundary-candidate{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}
+.boundary-candidate button{margin:0}
+.boundary-candidate button:first-child{white-space:normal;text-align:left;overflow-wrap:anywhere}
 @media(max-width:1279px){
   main{grid-template-columns:170px minmax(0,1fr)}
   .inspector{grid-column:1/-1;border-top:1px solid var(--line)}
@@ -54,7 +67,7 @@ main>aside{position:sticky;top:0;align-self:start;display:flex;flex-direction:co
   .review-dock .camera img{flex:none;height:clamp(64px,18dvh,150px)}
   .review-dock .transport{margin-top:8px}
   .review-tools .interval-fields{grid-template-columns:repeat(2,minmax(0,1fr))}
-  #curve-card{scroll-margin-top:calc(18dvh + 150px)}
+  #curve-card{top:calc(55dvh + 8px);right:8px;width:min(620px,calc(100vw - 16px));height:min(440px,calc(45dvh - 16px))}
 }
 @media(max-width:700px){
   main{display:block}
@@ -66,11 +79,12 @@ main>aside{position:sticky;top:0;align-self:start;display:flex;flex-direction:co
   .review-dock .camera header{height:22px;font-size:10px}
   .review-dock .camera img{height:clamp(48px,10dvh,88px)}
   .review-tools .interval-fields{grid-template-columns:1fr}
-  #curve-card{scroll-margin-top:calc(20dvh + 170px)}
+  .interval-side-controls,.interval-pair-grid{grid-template-columns:1fr}
+  #curve-card{top:auto;bottom:8px;right:8px;width:calc(100vw - 16px);height:min(330px,45dvh);min-width:0;min-height:56px}
   .batch-options{grid-template-columns:1fr}
 }
 @media(max-height:600px) and (max-width:1279px){
   .review-dock .camera-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
   .review-dock .camera img{height:clamp(40px,14dvh,80px)}
-  #curve-card{scroll-margin-top:calc(14dvh + 150px)}
+  #curve-card{height:min(270px,45dvh)}
 }

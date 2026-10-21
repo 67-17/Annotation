@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 .venv-det/
 state/
+state-*/
 verification/
 determined-checkpoints/
 .env

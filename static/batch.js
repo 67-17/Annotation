@@ -1,7 +1,7 @@
 "use strict";
 // Separate from manual labels: batch results are never auto-applied/confirmed.
 let screening = null, screeningResults = [], screeningDataset = null, screeningEpisode = null;
-let screeningLimit = 40, screeningPolling = false, focusedScreening = null, screeningSignature = null;
+let screeningLimit = 40, screeningPolling = false, focusedScreening = null, screeningSignature = null, boundarySignature = null;
 const screeningActive = run => run && ["queued", "planning", "running", "stopping"].includes(run.state);
 function boundaryCandidates(event) {
   const model = (event.model_boundaries || []).map(boundary => ({...boundary, origin:"模型"}));
@@ -12,6 +12,37 @@ function boundaryCandidates(event) {
   ).map(boundary => ({...boundary, origin:"曲线"}));
   return [...model, ...curve].sort((a,b) => (a.candidate_time ?? a.bracket_end) - (b.candidate_time ?? b.bracket_end));
 }
+function screeningBoundarySlots(events) {
+  const slots={left:[],right:[]};
+  if(!ep)return slots;
+  for(const side of ["left","right"]){
+    const seen=new Set(),candidates=[];
+    for(const event of events.filter(e=>e.side===side))for(const candidate of boundaryCandidates(event)){
+      const time=candidate.candidate_time??candidate.bracket_end;
+      const point=nearest(time,ep.clocks[side]||ep.clocks.data);
+      if(!point)continue;
+      const key=`${candidate.kind}:${point.time.toFixed(9)}`;
+      if(!seen.has(key)){seen.add(key);candidates.push({event,candidate,time:point.time,boundary:candidate.kind==="contact_start"?"start":"end"});}
+    }
+    candidates.sort((a,b)=>a.time-b.time||(a.boundary==="end"?-1:1));
+    let slot=null;
+    for(const entry of candidates){
+      if(!slot||slot[entry.boundary]){slot={start:null,end:null};slots[side].push(slot);}
+      slot[entry.boundary]=entry;
+      if(entry.boundary==="end")slot=null;
+    }
+  }
+  return slots;
+}
+function screeningPairCounts(events) {
+  const slots=screeningBoundarySlots(events);
+  return {left:slots.left.length,right:slots.right.length};
+}
+function screeningBoundarySuggestion(side,index,boundary) {
+  if(screeningDataset!==ds?.id||screeningEpisode!==ep?.id)return null;
+  return screeningBoundarySlots(screeningResults.flatMap(r=>r.events||[]))[side][index]?.[boundary]||null;
+}
+window.screeningBoundarySuggestion=screeningBoundarySuggestion;
 function durationLabel(seconds) {
   if (seconds == null) return "校准中（至少处理两个窗口）";
   if (seconds < 60) return `约 ${Math.max(1, Math.ceil(seconds))} 秒`;
@@ -20,6 +51,8 @@ function durationLabel(seconds) {
 }
 function renderScreeningStatus() {
   const active = screeningActive(screening);
+  $("mode-single").disabled = active;
+  $("mode-multiple").disabled = active;
   $("batch-start").disabled = !ds || active;
   $("batch-scope").disabled = !!active;
   $("batch-stop").hidden = !active;
@@ -28,8 +61,11 @@ function renderScreeningStatus() {
   $("batch-resume").textContent = screening?.options?.pipeline === "curve_first" ? "继续曲线优先筛查" : "继续旧全帧筛查（较慢）";
   $("batch-error").hidden = !screening?.error;
   $("batch-error").textContent = screening?.error || "";
-  $("batch-progress").max = screening?.total_windows || 1;
-  $("batch-progress").value = screening?.done_windows || 0;
+  const planning = screening?.state === "planning";
+  const progressTotal = planning ? screening?.total_units : screening?.total_windows;
+  const progressDone = planning ? screening?.planned_units : screening?.done_windows;
+  $("batch-progress").max = progressTotal || 1;
+  $("batch-progress").value = Math.min(progressDone || 0, progressTotal || 1);
   if (!screening) {
     $("batch-status").textContent = ds ? "尚未筛查。开始后先圈定曲线候选段，再交给模型。" : "请先导入数据集。";
     $("batch-estimate").textContent = "预计剩余时间：开始处理后按实际速度估算。";
@@ -38,7 +74,8 @@ function renderScreeningStatus() {
     const names = {queued:"等待开始", planning:curveFirst ? `曲线圈段中 · ${screening.planned_units || 0}/${screening.total_units || "…"} 侧/EP` : "统计完整帧数…", running:curveFirst ? "模型筛候选段中" : "旧全帧筛查中", stopping:"当前窗口结束后停止…", cancelled:"已停止，进度已保存", interrupted:"上次服务中断，可继续", error:"筛查出错，进度已保存", done:"自动筛查完成"};
     const here = screening.current;
     $("batch-status").textContent = `${names[screening.state] || screening.state} · ${screening.done_windows}/${screening.total_windows ?? "…"} 窗口 · ${screening.done_units}/${screening.total_units} 侧/EP${active && here ? ` · EP ${here.episode} ${here.side === "left" ? "左" : "右"} ${here.start.toFixed(2)}–${here.end.toFixed(2)}s` : ""}`;
-    const method = curveFirst ? `曲线 → 模型 · ${screening.candidate_regions ?? "…"} 个候选段${screening.full_scan_windows != null ? ` · ${screening.total_windows}/${screening.full_scan_windows} 个全帧窗口` : ""} · 未筛区段不代表无接触` : "旧全帧任务；点开始可创建曲线优先任务";
+    const mode = screening.options.contact_mode === "multiple" ? "多段筛查" : "单段筛查";
+    const method = curveFirst ? `${mode} · 曲线 → 模型 · ${screening.candidate_regions ?? "…"} 个候选段${screening.full_scan_windows != null ? ` · ${screening.total_windows}/${screening.full_scan_windows} 个全帧窗口` : ""} · 未筛区段不代表无接触` : `旧全帧任务 · ${mode}；点开始可创建曲线优先任务`;
     $("batch-estimate").textContent = `${method} · 预计剩余：${active ? durationLabel(screening.eta_seconds) : screening.state === "done" ? "自动筛查已结束" : "已暂停"} · 已计处理 ${durationLabel(screening.processing_seconds).replace("约 ", "")}。估算含图像读取和推理，不含人工复核；负载或错误会影响估算。${screening.failed_windows ? ` ${screening.failed_windows} 个窗口失败／格式无效，不能按无接触处理。` : ""}`;
     const timing = screening.last_window;
     if (timing) $("batch-estimate").textContent += ` 上窗：读图 ${timing.read_seconds.toFixed(2)} s · 模型调用 ${timing.model_seconds.toFixed(2)} s · 总计 ${timing.total_seconds.toFixed(2)} s。`;
@@ -57,29 +94,16 @@ function renderScreeningEvents() {
   if (signature === screeningSignature) return;
   screeningSignature = signature;
   const all = screeningResults.flatMap(r => r.events || []);
+  ensureScreeningSlots(screeningPairCounts(all),`${screening?.id||"none"}-${screeningEpisode}`);
+  const nextBoundarySignature=JSON.stringify([screeningDataset,screeningEpisode,screening?.id,all]);
+  if(ep&&nextBoundarySignature!==boundarySignature){boundarySignature=nextBoundarySignature;renderIntervals();}
   const visible = all.filter(e => boundaryCandidates(e).length > 0);
-  $("batch-review-summary").textContent = screeningResults.length ? `${screeningResults.filter(r => r.state === "done").length}/2 侧已完成 · ${visible.length} 处候选边界。${screening?.options.pipeline === "curve_first" ? " 仅检查曲线候选段，未筛区段仍需留意漏检。" : ""}` : "本 EP 暂无已完成筛查结果；完成一侧后自动显示。";
+  $("batch-review-summary").textContent = screeningResults.length ? `${screeningResults.filter(r => r.state === "done").length}/2 侧已完成 · ${visible.length} 处候选区域。候选按钮已放在上方对应的接触/离开框中。${screening?.options.pipeline === "curve_first" ? " 未筛区段仍需留意漏检。" : ""}` : "本 EP 暂无已完成筛查结果；完成一侧后自动显示。";
   $("batch-events").replaceChildren(...visible.slice(0, screeningLimit).map(e => {
     const box = element("div", undefined, "screening-event" + (focusedScreening === e.id ? " focused" : ""));
     const head = element("div", undefined, "card-head");
     head.append(element("strong", `${e.side === "left" ? "左夹爪" : "右夹爪"} · ${e.start.toFixed(3)}–${e.end.toFixed(3)} s · 边界选帧`));
     box.append(head, element("p", e.reason));
-    const candidates=boundaryCandidates(e);
-    const labels={contact_start:"接触",contact_end:"离开"};
-    let group=0,hasStart=false;
-    for(const candidate of candidates){
-      const boundary=candidate.kind==="contact_start"?"start":"end",time=candidate.candidate_time??candidate.bracket_end;
-      if(boundary==="start"&&hasStart)group++;
-      if(boundary==="start")hasStart=true;
-      const markerId=`screening-${e.id}-${group}`;
-      if(boundary==="end"){group++;hasStart=false;}
-      const point=nearest(time,ep.clocks[e.side]||ep.clocks.data);
-      const row=element("div",undefined,"candidate-row");
-      row.append(button(`${e.side==="left"?"左":"右"}夹爪最可能${labels[candidate.kind]}第一帧 · ${point.time.toFixed(3)} s`,()=>{focusScreeningEvent(e,point.time);}));
-      const marked=ann.intervals.some(i=>i.side===e.side&&i[boundary]!==null&&i[boundary]!==undefined);
-      row.append(button(marked?"取消标记":"设置为标记",()=>markScreeningCandidate(e,boundary,point.time,candidate.origin==="模型"?"model":"curve",markerId)));
-      row.append(element("span",`${candidate.origin}候选`,"muted"));box.append(row);
-    }
     return box;
   }));
   $("batch-more").hidden = visible.length <= screeningLimit;
@@ -91,7 +115,6 @@ function focusScreeningEvent(event,time=event.focus) {
   $("clock").value = ep.clocks[event.side] ? event.side : "data";
   seek(nearest(time,ep.clocks[event.side]||ep.clocks.data).time);
   renderScreeningEvents();
-  $("curve-card").scrollIntoView?.({behavior:"smooth", block:"start"});
 }
 window.drawScreeningOverlay = (ctx, curve, x, height) => {
   if (screeningDataset !== ds?.id || screeningEpisode !== ep?.id) return;
@@ -134,9 +157,9 @@ async function refreshScreening() {
 $("batch-refresh").onclick = guarded(refreshScreening);
 $("batch-start").onclick = guarded(async () => {
   if (!ds) throw Error("请先导入数据集");
-  if (dirty) throw Error("请先保存人工标注，再开始筛查");
+  if (dirty || saveRequest) await save();
   if ($("batch-scope").value === "current" && !ep) throw Error("请先选择要测试的 EP");
-  const run = await api("api/screening", {method:"POST",body:JSON.stringify({dataset:ds.id,pipeline:"curve_first",episodes:$("batch-scope").value === "current" ? [ep.id] : null,coverage:"native",frames:6,camera:$("model-camera").value,prompt:$("prompt").value})});
+  const run = await api("api/screening", {method:"POST",body:JSON.stringify({dataset:ds.id,pipeline:"curve_first",contact_mode:annotationMode(),episodes:$("batch-scope").value === "current" ? [ep.id] : null,coverage:"native",frames:6,camera:$("model-camera").value,prompt:$("prompt").value})});
   screening = run;renderScreeningStatus();await refreshScreening();
 });
 $("batch-stop").onclick = guarded(async () => {await api(`api/screening/${screening.id}/stop`, {method:"POST"});await refreshScreening();});
